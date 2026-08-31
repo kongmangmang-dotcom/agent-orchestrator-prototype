@@ -1,4 +1,5 @@
 import { apiFetch } from './client'
+import type { ApiRun } from './runs'
 import type { ApiWorkflowRun, ListResponse } from './types'
 
 export interface ApiTaskPlanItem {
@@ -210,6 +211,42 @@ export function startTaskWorkflow(
       task_prompt: opts?.task_prompt ?? undefined,
     }),
   })
+}
+
+export interface ApiTaskAgentChatResponse {
+  run_id: string
+  agent_id: string
+  status: string
+  created: boolean
+  mode: 'start' | 'inject' | 'continue' | string
+  docs_attached: boolean
+}
+
+export function taskAgentChat(
+  taskId: string,
+  body: {
+    agent_id: string
+    message: string
+    run_id?: string | null
+    new_session?: boolean
+  },
+) {
+  return apiFetch<ApiTaskAgentChatResponse>(`/schedule/tasks/${taskId}/agent-chat`, {
+    method: 'POST',
+    body: JSON.stringify({
+      agent_id: body.agent_id,
+      message: body.message,
+      run_id: body.run_id ?? undefined,
+      new_session: body.new_session ?? false,
+    }),
+  })
+}
+
+export function getLatestTaskAgentChat(taskId: string, agentId?: string | null) {
+  const q = agentId ? `?agent_id=${encodeURIComponent(agentId)}` : ''
+  return apiFetch<ApiRun | null>(
+    `/schedule/tasks/${taskId}/agent-chat/latest${q}`,
+  )
 }
 
 export function createTaskNote(

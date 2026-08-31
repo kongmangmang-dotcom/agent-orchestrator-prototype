@@ -45,10 +45,20 @@ function FileDiffBlock({ file, expanded, onToggle }: { file: ApiFileChange; expa
   )
 }
 
-export function LiveRunPanel({ runId }: { runId: string }) {
+export function LiveRunPanel({
+  runId,
+  onSend,
+  allowSendWhenIdle = false,
+}: {
+  runId: string
+  /** When set, all sends go through this (e.g. task agent-chat). May return a new run id. */
+  onSend?: (text: string) => void | Promise<void | string>
+  allowSendWhenIdle?: boolean
+}) {
   const { run, messages, events, files, loading, error, sendCorrection, cancel, isRunning } = useLiveRun(runId)
   const [tab, setTab] = useState<Tab>('chat')
   const [expandedFile, setExpandedFile] = useState<string | null>(null)
+  const [sending, setSending] = useState(false)
 
   if (loading && !run) {
     return <div className="p-10 text-sm text-text-muted">加载 Run…</div>
@@ -67,6 +77,27 @@ export function LiveRunPanel({ runId }: { runId: string }) {
     { id: 'files', label: '文件', icon: FileDiff, count: files.length },
     { id: 'logs', label: '日志', icon: List, count: events.length },
   ]
+
+  const canSend = !sending && (isRunning || allowSendWhenIdle || Boolean(onSend))
+  const disabledReason = sending
+    ? '发送中…'
+    : !canSend
+      ? 'Run 未在运行中'
+      : undefined
+
+  const handleSend = async (text: string) => {
+    if (!text.trim() || sending) return
+    setSending(true)
+    try {
+      if (onSend) {
+        await onSend(text)
+      } else {
+        await sendCorrection(text)
+      }
+    } finally {
+      setSending(false)
+    }
+  }
 
   return (
     <div className="flex flex-col h-full min-h-0">
@@ -171,9 +202,9 @@ export function LiveRunPanel({ runId }: { runId: string }) {
       </div>
 
       <AgentCommandInput
-        disabled={!isRunning}
-        disabledReason={!isRunning ? 'Run 未在运行中' : undefined}
-        onSend={text => { sendCorrection(text) }}
+        disabled={!canSend}
+        disabledReason={disabledReason}
+        onSend={text => { void handleSend(text) }}
       />
     </div>
   )

@@ -1,7 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { PageHeader, Badge, Btn, StatusDot } from '../components/ui'
 import { MarkdownPreview } from '../components/MarkdownPreview'
+import { listAgents } from '../api/agents'
+import type { ApiAgent } from '../api/types'
+import { LiveRunPanel } from '../components/LiveRunPanel'
+import { AgentCommandInput } from '../components/AgentCommandInput'
 import {
   createDailyTask,
   createTaskMemory,
@@ -11,10 +15,12 @@ import {
   deleteTaskNote,
   getDailyTask,
   getDayOverview,
+  getLatestTaskAgentChat,
   listDailyTasks,
   planToday,
   regeneratePlan,
   startTaskWorkflow,
+  taskAgentChat,
   updateDailyTask,
   updateTaskMemory,
   type ApiDailyTask,
@@ -29,7 +35,7 @@ import type { ApiWorkflowDefinitionSummary } from '../api/types'
 import {
   Sparkles, Code2, CheckCircle2, Circle, Loader2,
   RefreshCw, Bot, Clock, ArrowRight, ListTodo, Plus, Trash2, Play,
-  FileText, Pin, Eye, X,
+  FileText, Pin, Eye, X, MessageSquare, Minus,
 } from 'lucide-react'
 
 const statusBadge = {
@@ -105,6 +111,85 @@ export function SchedulePage() {
   const [boundIds, setBoundIds] = useState<string[]>([])
   const [savingBinds, setSavingBinds] = useState(false)
   const [showAddWorkflow, setShowAddWorkflow] = useState(false)
+  const [showAgentChat, setShowAgentChat] = useState(false)
+  const [agentChatCollapsed, setAgentChatCollapsed] = useState(false)
+  const [chatPos, setChatPos] = useState<{ x: number; y: number } | null>(null)
+  const chatDragRef = useRef<{
+    pointerId: number
+    startX: number
+    startY: number
+    origX: number
+    origY: number
+    moved: boolean
+  } | null>(null)
+  const chatWindowRef = useRef<HTMLDivElement | null>(null)
+  const suppressChatClickRef = useRef(false)
+  const [agents, setAgents] = useState<ApiAgent[]>([])
+  const [chatAgentId, setChatAgentId] = useState('')
+  const [chatRunId, setChatRunId] = useState<string | null>(null)
+  const [chatSending, setChatSending] = useState(false)
+  const [chatHint, setChatHint] = useState<string | null>(null)
+
+  const clampChatPos = useCallback((x: number, y: number, el?: HTMLElement | null) => {
+    const w = el?.offsetWidth ?? (agentChatCollapsed ? 220 : 440)
+    const h = el?.offsetHeight ?? (agentChatCollapsed ? 48 : 620)
+    const maxX = Math.max(8, window.innerWidth - w - 8)
+    const maxY = Math.max(8, window.innerHeight - h - 8)
+    return {
+      x: Math.min(Math.max(8, x), maxX),
+      y: Math.min(Math.max(8, y), maxY),
+    }
+  }, [agentChatCollapsed])
+
+  const onChatDragStart = useCallback((e: ReactPointerEvent) => {
+    if (e.button !== 0) return
+    const target = e.target as HTMLElement
+    // Allow dragging the collapsed pill button; block other controls in the header.
+    const isPill = Boolean(target.closest('[data-chat-drag="pill"]'))
+    if (!isPill && target.closest('button, select, input, textarea, a')) return
+    const el = chatWindowRef.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    const orig = chatPos ?? { x: rect.left, y: rect.top }
+    chatDragRef.current = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      origX: orig.x,
+      origY: orig.y,
+      moved: false,
+    }
+    el.setPointerCapture(e.pointerId)
+    e.preventDefault()
+  }, [chatPos])
+
+  const onChatDragMove = useCallback((e: ReactPointerEvent) => {
+    const drag = chatDragRef.current
+    if (!drag || drag.pointerId !== e.pointerId) return
+    const dx = e.clientX - drag.startX
+    const dy = e.clientY - drag.startY
+    if (Math.abs(dx) > 2 || Math.abs(dy) > 2) drag.moved = true
+    setChatPos(clampChatPos(drag.origX + dx, drag.origY + dy, chatWindowRef.current))
+  }, [clampChatPos])
+
+  const onChatDragEnd = useCallback((e: ReactPointerEvent) => {
+    const drag = chatDragRef.current
+    if (!drag || drag.pointerId !== e.pointerId) return
+    if (drag.moved) {
+      suppressChatClickRef.current = true
+      window.setTimeout(() => { suppressChatClickRef.current = false }, 0)
+    }
+    chatDragRef.current = null
+    try {
+      chatWindowRef.current?.releasePointerCapture(e.pointerId)
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  const chatFloatStyle: CSSProperties = chatPos
+    ? { left: chatPos.x, top: chatPos.y, right: 'auto', bottom: 'auto' }
+    : { right: 24, bottom: 24 }
 
   const loadTasks = useCallback(async (preferId?: string | null, dateOverride?: string) => {
     const day = dateOverride ?? planDate
@@ -170,6 +255,70 @@ export function SchedulePage() {
       })
       .catch(() => {/* ignore */})
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    listAgents()
+      .then(res => {
+        setAgents(res.items)
+        if (res.items.length && !chatAgentId) {
+          setChatAgentId(res.items[0].id)
+        }
+      })
+      .catch(() => {/* ignore */})
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    setChatHint(null)
+    setChatRunId(null)
+  }, [selectedId])
+
+  useEffect(() => {
+    if (!showAgentChat || !selectedId || !chatAgentId) {
+      if (!showAgentChat) return
+      setChatRunId(null)
+      return
+    }
+    let cancelled = false
+    getLatestTaskAgentChat(selectedId, chatAgentId)
+      .then(run => {
+        if (!cancelled) {
+          setChatRunId(run?.id ?? null)
+          setChatHint(null)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setChatRunId(null)
+      })
+    return () => { cancelled = true }
+  }, [showAgentChat, selectedId, chatAgentId])
+
+  async function handleTaskAgentSend(message: string, opts?: { newSession?: boolean }) {
+    if (!selectedId || !chatAgentId || !message.trim() || chatSending) return
+    setChatSending(true)
+    setChatHint(null)
+    setError(null)
+    try {
+      const res = await taskAgentChat(selectedId, {
+        agent_id: chatAgentId,
+        message: message.trim(),
+        run_id: opts?.newSession ? null : chatRunId,
+        new_session: opts?.newSession ?? false,
+      })
+      setChatRunId(res.run_id)
+      if (res.docs_attached) {
+        setChatHint('已附带任务文档（仅本会话首轮）')
+      } else if (res.mode === 'continue') {
+        setChatHint('已延续历史上下文（未再附带文档）')
+      } else if (res.mode === 'inject') {
+        setChatHint('已注入当前会话')
+      }
+      await loadDetail(selectedId)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Agent 对话失败')
+    } finally {
+      setChatSending(false)
+    }
+  }
 
   useEffect(() => {
     if (selectedId) loadDetail(selectedId)
@@ -449,6 +598,7 @@ export function SchedulePage() {
   }
 
   const selectedSummary = tasks.find(t => t.id === selectedId)
+  const chatTaskTitle = (detail?.title || selectedSummary?.title || '').trim() || '未命名任务'
   const workflowPlans: ApiWorkflowPlanGroup[] = detail?.workflow_plans?.length
     ? detail.workflow_plans
     : (detail?.workflow_definition_id
@@ -667,6 +817,17 @@ export function SchedulePage() {
               description={detail?.summary || selectedSummary.summary || '暂无系统摘要'}
               action={
                 <div className="flex gap-2 flex-wrap">
+                  <Btn
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => {
+                      setShowAgentChat(true)
+                      setAgentChatCollapsed(false)
+                    }}
+                  >
+                    <MessageSquare className="w-3.5 h-3.5" />
+                    Agent 对话
+                  </Btn>
                   <Btn variant="secondary" size="sm" onClick={handleRegeneratePlan} disabled={regenerating}>
                     <RefreshCw className={`w-3.5 h-3.5 ${regenerating ? 'animate-spin' : ''}`} />
                     {regenerating ? '生成中…' : '刷新开发计划'}
@@ -1095,6 +1256,135 @@ export function SchedulePage() {
             </div>
           </div>
         </div>
+      )}
+
+      {selectedId && showAgentChat && (
+        agentChatCollapsed ? (
+          <div
+            ref={chatWindowRef}
+            style={chatFloatStyle}
+            onPointerMove={onChatDragMove}
+            onPointerUp={onChatDragEnd}
+            onPointerCancel={onChatDragEnd}
+            className="fixed z-40 touch-none"
+          >
+            <button
+              type="button"
+              data-chat-drag="pill"
+              onPointerDown={onChatDragStart}
+              onClick={() => {
+                if (suppressChatClickRef.current) return
+                setAgentChatCollapsed(false)
+              }}
+              className="flex items-center gap-2 px-4 py-3 rounded-full bg-surface-1 border border-border shadow-lg text-sm text-text-strong hover:border-accent transition-colors cursor-grab active:cursor-grabbing max-w-[min(360px,calc(100vw-3rem))]"
+            >
+              <MessageSquare className="w-4 h-4 text-accent shrink-0" />
+              <span className="shrink-0">Agent 对话</span>
+              <span className="text-xs text-text-muted truncate" title={chatTaskTitle}>
+                {chatTaskTitle}
+              </span>
+            </button>
+          </div>
+        ) : (
+          <div
+            ref={chatWindowRef}
+            style={chatFloatStyle}
+            onPointerMove={onChatDragMove}
+            onPointerUp={onChatDragEnd}
+            onPointerCancel={onChatDragEnd}
+            className="fixed z-40 w-[min(440px,calc(100vw-2rem))] h-[min(620px,calc(100vh-5rem))] flex flex-col rounded-xl bg-surface-1 border border-border shadow-2xl overflow-hidden touch-none"
+          >
+            <div
+              className="px-4 py-3 border-b border-border-subtle space-y-2 shrink-0 bg-surface-1 cursor-grab active:cursor-grabbing select-none"
+              onPointerDown={onChatDragStart}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <MessageSquare className="w-4 h-4 text-accent shrink-0" />
+                    <span className="text-sm font-medium text-text-strong shrink-0">Agent 对话</span>
+                  </div>
+                  <div className="mt-1 text-xs text-text-muted truncate pl-6" title={chatTaskTitle}>
+                    当前任务：{chatTaskTitle}
+                  </div>
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    title="收起"
+                    className="p-1.5 rounded-md text-text-muted hover:text-text-strong hover:bg-surface-2"
+                    onClick={() => setAgentChatCollapsed(true)}
+                  >
+                    <Minus className="w-4 h-4" />
+                  </button>
+                  <button
+                    type="button"
+                    title="关闭"
+                    className="p-1.5 rounded-md text-text-muted hover:text-text-strong hover:bg-surface-2"
+                    onClick={() => {
+                      setShowAgentChat(false)
+                      setAgentChatCollapsed(false)
+                    }}
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+              <p className="text-[11px] text-text-muted leading-snug">
+                首轮附带任务文档；同一会话后续不再重复附带。
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <select
+                  value={chatAgentId}
+                  onChange={e => setChatAgentId(e.target.value)}
+                  className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg border border-border-subtle bg-surface-0 text-xs"
+                >
+                  {agents.length === 0 && <option value="">暂无 Agent</option>}
+                  {agents.map(a => (
+                    <option key={a.id} value={a.id}>{a.name}</option>
+                  ))}
+                </select>
+                <Btn
+                  variant="secondary"
+                  size="sm"
+                  disabled={!chatAgentId || chatSending}
+                  onClick={() => {
+                    setChatRunId(null)
+                    setChatHint('新会话：下一条消息将附带文档')
+                  }}
+                >
+                  新会话
+                </Btn>
+              </div>
+              {chatHint && <div className="text-[11px] text-accent">{chatHint}</div>}
+            </div>
+            <div className="flex-1 min-h-0 flex flex-col">
+              {chatRunId ? (
+                <LiveRunPanel
+                  key={chatRunId}
+                  runId={chatRunId}
+                  allowSendWhenIdle
+                  onSend={async text => {
+                    await handleTaskAgentSend(text)
+                  }}
+                />
+              ) : (
+                <div className="flex flex-col h-full min-h-0">
+                  <div className="flex-1 flex items-center justify-center p-5 text-sm text-text-muted text-center">
+                    发送第一条消息开始对话（将附带任务文档）
+                  </div>
+                  <AgentCommandInput
+                    disabled={!chatAgentId || chatSending}
+                    disabledReason={
+                      !chatAgentId ? '请先选择 Agent' : chatSending ? '发送中…' : undefined
+                    }
+                    onSend={text => { void handleTaskAgentSend(text, { newSession: true }) }}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+        )
       )}
     </div>
   )
