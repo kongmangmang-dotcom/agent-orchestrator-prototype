@@ -47,9 +47,24 @@ export function WorkflowsPage() {
   const [taskPrompt, setTaskPrompt] = useState('')
   const [workspacePath, setWorkspacePath] = useState('workspace/demo')
   const [startingRun, setStartingRun] = useState(false)
+  const [tagFilter, setTagFilter] = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const agentsById = useMemo(() => new Map(agents.map(a => [a.id, a])), [agents])
+
+  const allTags = useMemo(() => {
+    const set = new Set<string>()
+    for (const wf of definitions) {
+      for (const tag of wf.tags ?? []) set.add(tag)
+    }
+    for (const tag of ['计划', '开发']) set.add(tag)
+    return Array.from(set)
+  }, [definitions])
+
+  const filteredDefinitions = useMemo(() => {
+    if (!tagFilter) return definitions
+    return definitions.filter(wf => (wf.tags ?? []).includes(tagFilter))
+  }, [definitions, tagFilter])
 
   function patchSearchParams(next: Record<string, string | null>) {
     const params = new URLSearchParams(searchParams)
@@ -245,15 +260,49 @@ export function WorkflowsPage() {
         </div>
 
         <section className="space-y-5">
-          <SectionTitle>模板列表 {loading ? '（加载中…）' : ''}</SectionTitle>
+          <div className="flex items-center justify-between gap-4 flex-wrap">
+            <SectionTitle>模板列表 {loading ? '（加载中…）' : ''}</SectionTitle>
+            <div className="flex flex-wrap gap-2 items-center">
+              <button
+                type="button"
+                onClick={() => setTagFilter(null)}
+                className={`px-2.5 py-1 rounded-full text-xs border ${
+                  tagFilter == null
+                    ? 'bg-accent/15 border-accent/40 text-accent'
+                    : 'border-border text-text-muted hover:text-text'
+                }`}
+              >
+                全部
+              </button>
+              {allTags.map(tag => (
+                <button
+                  key={tag}
+                  type="button"
+                  onClick={() => setTagFilter(tag)}
+                  className={`px-2.5 py-1 rounded-full text-xs border ${
+                    tagFilter === tag
+                      ? 'bg-accent/15 border-accent/40 text-accent'
+                      : 'border-border text-text-muted hover:text-text'
+                  }`}
+                >
+                  {tag}
+                </button>
+              ))}
+            </div>
+          </div>
           {!loading && definitions.length === 0 && (
             <div className="p-10 text-center rounded-xl border border-border-subtle bg-surface-1 text-sm text-text-muted">
               暂无工作流模板。
               <Link to="/workflows/new" className="text-accent mx-1">创建第一个</Link>
             </div>
           )}
+          {!loading && definitions.length > 0 && filteredDefinitions.length === 0 && (
+            <div className="p-6 text-center rounded-xl border border-border-subtle bg-surface-1 text-sm text-text-muted">
+              没有带「{tagFilter}」标签的模板
+            </div>
+          )}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            {definitions.map(wf => (
+            {filteredDefinitions.map(wf => (
               <div
                 key={wf.id}
                 className={`text-left p-6 rounded-xl border transition-all shadow-sm ${
@@ -276,6 +325,13 @@ export function WorkflowsPage() {
                   </div>
                   <div className="text-base font-medium text-text-strong">{wf.title}</div>
                   <div className="font-mono text-xs text-text-muted mt-1">{wf.name}</div>
+                  {(wf.tags?.length ?? 0) > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mt-2">
+                      {wf.tags.map(tag => (
+                        <Badge key={tag} variant="accent">{tag}</Badge>
+                      ))}
+                    </div>
+                  )}
                   {wf.description && (
                     <p className="text-xs text-text-muted mt-2 line-clamp-2 leading-relaxed">{wf.description}</p>
                   )}
@@ -312,6 +368,9 @@ export function WorkflowsPage() {
               </div>
               <div className="flex items-center gap-2 flex-wrap">
                 <Badge variant="accent">{selectedSummary.name}</Badge>
+                {(detail?.tags ?? selectedSummary.tags ?? []).map(tag => (
+                  <Badge key={tag} variant="info">{tag}</Badge>
+                ))}
                 {detail?.options?.reuse_same_agent_session ? (
                   <Badge variant="info">同 Agent 长对话</Badge>
                 ) : null}

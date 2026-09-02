@@ -119,7 +119,7 @@ export function Toggle({ checked, label }: { checked: boolean; label: string }) 
   )
 }
 
-export function PermissionGrid({ permissions }: { permissions: Record<string, boolean> }) {
+export function PermissionGrid({ permissions }: { permissions?: Record<string, boolean> | null }) {
   const labels: Record<string, string> = {
     readFiles: '读取文件',
     writeFiles: '写入文件',
@@ -129,7 +129,7 @@ export function PermissionGrid({ permissions }: { permissions: Record<string, bo
   }
   return (
     <div className="flex flex-wrap gap-2">
-      {Object.entries(permissions).map(([key, val]) => (
+      {Object.entries(permissions ?? {}).map(([key, val]) => (
         <Badge key={key} variant={val ? 'success' : 'default'}>
           {labels[key] ?? key}: {val ? '是' : '否'}
         </Badge>

@@ -8,19 +8,23 @@ import {
   CalendarDays,
   ChartColumn,
   Hexagon,
+  UsersRound,
+  BookOpen,
 } from 'lucide-react'
 
 const nav = [
   { to: '/', icon: LayoutDashboard, label: '概览' },
   { to: '/progress', icon: ChartColumn, label: '完成总览' },
   { to: '/providers', icon: Plug, label: 'Provider 管理' },
+  { to: '/roles', icon: UsersRound, label: '角色配置' },
   { to: '/agents', icon: Bot, label: 'Agent 管理' },
+  { to: '/knowledge', icon: BookOpen, label: '知识库' },
   { to: '/workflows', icon: GitBranch, label: '工作流' },
   { to: '/runs', icon: Activity, label: '运行监控' },
   { to: '/schedule', icon: CalendarDays, label: '今日计划' },
 ]
 
-const FULL_BLEED = ['/workflows', '/runs', '/schedule']
+const FULL_BLEED = ['/workflows', '/runs', '/schedule', '/knowledge']
 
 export function AppLayout() {
   const { pathname } = useLocation()

@@ -371,6 +371,7 @@ export function RunMonitorPage() {
                             </div>
                             <div className="text-xs text-text-muted">
                               {step.agent_name || step.agent_id}
+                              {step.role ? ` · 角色 ${step.role}` : ''}
                               {step.provider_name ? ` · ${step.provider_name}` : ''}
                               {step.depends_on?.length ? ` · 依赖 ${step.depends_on.join(', ')}` : ''}
                             </div>

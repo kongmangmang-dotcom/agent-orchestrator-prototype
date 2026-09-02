@@ -1,30 +1,35 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { listAgents } from '../api/agents'
+import { createRole, listRoleTemplates } from '../api/roles'
 import { createWorkflowDefinition, getWorkflowDefinition, updateWorkflowDefinition } from '../api/workflows'
-import type { ApiAgent } from '../api/types'
+import type { ApiAgent, ApiRoleTemplate } from '../api/types'
 import { formStepsToDag } from '../lib/workflowMap'
 import { validateWorkflowSteps } from '../lib/workflowDagValidate'
 import { WorkflowDAG } from '../components/WorkflowDAG'
 import { PageHeader, Btn, SectionTitle } from '../components/ui'
-import { ArrowDown, ArrowUp, Plus, Trash2 } from 'lucide-react'
+import { ArrowDown, ArrowUp, Plus, Trash2, X } from 'lucide-react'
 
 export interface StepFormRow {
   step_key: string
   label: string
   agent_id: string
+  role: string
   depends_on: string[]
   parallel: boolean
 }
 
 const FEATURE_DEV_PRESET: Omit<StepFormRow, 'agent_id'>[] = [
-  { step_key: 'planning', label: '任务规划', depends_on: [], parallel: false },
-  { step_key: 'research', label: '项目调研', depends_on: ['planning'], parallel: false },
-  { step_key: 'backend', label: '后端实现', depends_on: ['research'], parallel: false },
-  { step_key: 'frontend', label: '前端实现', depends_on: ['research'], parallel: true },
-  { step_key: 'testing', label: '测试验证', depends_on: ['backend', 'frontend'], parallel: false },
-  { step_key: 'review', label: '代码评审', depends_on: ['testing'], parallel: false },
+  { step_key: 'planning', label: '任务规划', role: 'planner', depends_on: [], parallel: false },
+  { step_key: 'research', label: '项目调研', role: 'researcher', depends_on: ['planning'], parallel: false },
+  { step_key: 'backend', label: '后端实现', role: 'developer', depends_on: ['research'], parallel: false },
+  { step_key: 'frontend', label: '前端实现', role: 'developer', depends_on: ['research'], parallel: true },
+  { step_key: 'testing', label: '测试验证', role: 'tester', depends_on: ['backend', 'frontend'], parallel: false },
+  { step_key: 'review', label: '代码评审', role: 'reviewer', depends_on: ['testing'], parallel: false },
 ]
+
+/** 工作流模板预设分类标签 */
+export const WORKFLOW_TAG_PRESETS = ['计划', '开发'] as const
 
 const AGENT_NAME_BY_STEP: Record<string, string> = {
   planning: 'openai-planner',
@@ -40,6 +45,7 @@ function emptyStep(): StepFormRow {
     step_key: '',
     label: '',
     agent_id: '',
+    role: '',
     depends_on: [],
     parallel: false,
   }
@@ -60,21 +66,38 @@ export function WorkflowFormPage() {
   const isEdit = Boolean(editId)
 
   const [agents, setAgents] = useState<ApiAgent[]>([])
+  const [roleTemplates, setRoleTemplates] = useState<ApiRoleTemplate[]>([])
   const [loadingAgents, setLoadingAgents] = useState(true)
   const [loadingDefinition, setLoadingDefinition] = useState(isEdit)
   const [name, setName] = useState('')
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
+  const [tags, setTags] = useState<string[]>([])
+  const [customTag, setCustomTag] = useState('')
   const [reuseSameAgentSession, setReuseSameAgentSession] = useState(false)
   const [preservedOptions, setPreservedOptions] = useState<Record<string, unknown>>({})
   const [steps, setSteps] = useState<StepFormRow[]>([emptyStep()])
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [nameTouched, setNameTouched] = useState(false)
+  const [roleDialogStepIndex, setRoleDialogStepIndex] = useState<number | null>(null)
+  const [roleForm, setRoleForm] = useState({
+    code: '',
+    name: '',
+    description: '',
+    system_prompt: '',
+    default_provider_kind: '',
+    sort_order: 100,
+  })
+  const [roleFormError, setRoleFormError] = useState<string | null>(null)
+  const [roleSubmitting, setRoleSubmitting] = useState(false)
 
   useEffect(() => {
-    listAgents()
-      .then(res => setAgents(res.items))
+    Promise.all([listAgents(), listRoleTemplates()])
+      .then(([agentRes, roleRes]) => {
+        setAgents(agentRes.items)
+        setRoleTemplates(roleRes.items)
+      })
       .catch(e => setError(e instanceof Error ? e.message : '加载 Agent 失败'))
       .finally(() => setLoadingAgents(false))
   }, [])
@@ -87,6 +110,7 @@ export function WorkflowFormPage() {
         setName(def.name)
         setTitle(def.title)
         setDescription(def.description)
+        setTags(Array.isArray(def.tags) ? def.tags : [])
         setNameTouched(true)
         setPreservedOptions(def.options ?? {})
         setReuseSameAgentSession(Boolean(def.options?.reuse_same_agent_session))
@@ -96,6 +120,7 @@ export function WorkflowFormPage() {
                 step_key: s.step_key,
                 label: s.label,
                 agent_id: s.agent_id,
+                role: s.role || '',
                 depends_on: s.depends_on,
                 parallel: s.parallel,
               }))
@@ -142,11 +167,73 @@ export function WorkflowFormPage() {
       applyTitle('功能开发流程')
       setDescription('规划 → 调研 → 并行开发 → 测试 → 评审')
     }
+    setTags(prev => (prev.includes('开发') ? prev : [...prev, '开发']))
     setError(null)
+  }
+
+  function toggleTag(tag: string) {
+    setTags(prev => (prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag]))
+  }
+
+  function addCustomTag() {
+    const next = customTag.trim()
+    if (!next) return
+    setTags(prev => (prev.includes(next) ? prev : [...prev, next]))
+    setCustomTag('')
   }
 
   function updateStep(index: number, patch: Partial<StepFormRow>) {
     setSteps(prev => prev.map((row, i) => (i === index ? { ...row, ...patch } : row)))
+  }
+
+  function openCreateRoleForStep(index: number) {
+    const step = steps[index]
+    const hint = (step?.label || step?.step_key || 'custom').trim()
+    const codeGuess =
+      hint
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 32) || 'custom-role'
+    setRoleDialogStepIndex(index)
+    setRoleForm({
+      code: codeGuess,
+      name: hint || 'Custom Role',
+      description: '',
+      system_prompt: '',
+      default_provider_kind: '',
+      sort_order: 100,
+    })
+    setRoleFormError(null)
+  }
+
+  async function handleCreateRoleForStep(e: React.FormEvent) {
+    e.preventDefault()
+    if (roleDialogStepIndex == null) return
+    if (!roleForm.code.trim() || !roleForm.name.trim()) {
+      setRoleFormError('请填写 code 与名称')
+      return
+    }
+    setRoleSubmitting(true)
+    setRoleFormError(null)
+    try {
+      const created = await createRole({
+        code: roleForm.code.trim(),
+        name: roleForm.name.trim(),
+        description: roleForm.description.trim(),
+        system_prompt: roleForm.system_prompt.trim(),
+        default_provider_kind: roleForm.default_provider_kind.trim(),
+        sort_order: Number(roleForm.sort_order) || 100,
+      })
+      const roleRes = await listRoleTemplates()
+      setRoleTemplates(roleRes.items)
+      updateStep(roleDialogStepIndex, { role: created.code })
+      setRoleDialogStepIndex(null)
+    } catch (err) {
+      setRoleFormError(err instanceof Error ? err.message : '创建角色失败')
+    } finally {
+      setRoleSubmitting(false)
+    }
   }
 
   function moveStep(index: number, direction: -1 | 1) {
@@ -184,6 +271,7 @@ export function WorkflowFormPage() {
         step_key: row.step_key.trim(),
         label: row.label.trim() || row.step_key.trim(),
         agent_id: row.agent_id,
+        role: (row.role || '').trim(),
         depends_on: row.depends_on,
         parallel: row.parallel,
         sort_order: index,
@@ -205,9 +293,11 @@ export function WorkflowFormPage() {
           name: name.trim(),
           title: title.trim(),
           description: description.trim(),
+          tags,
           options: {
             ...preservedOptions,
             reuse_same_agent_session: reuseSameAgentSession,
+            tags,
           },
           steps: normalized,
         }
@@ -233,6 +323,7 @@ export function WorkflowFormPage() {
       preservedOptions,
       reuseSameAgentSession,
       steps,
+      tags,
       title,
     ],
   )
@@ -297,6 +388,59 @@ export function WorkflowFormPage() {
                 className="mt-1 w-full px-3 py-2 rounded-md bg-surface-2 border border-border text-sm"
               />
             </label>
+            <div className="md:col-span-2 space-y-2">
+              <div className="text-xs text-text-muted">分类标签</div>
+              <div className="flex flex-wrap gap-2">
+                {WORKFLOW_TAG_PRESETS.map(tag => {
+                  const active = tags.includes(tag)
+                  return (
+                    <button
+                      key={tag}
+                      type="button"
+                      onClick={() => toggleTag(tag)}
+                      className={`px-3 py-1.5 rounded-full text-xs border transition-colors ${
+                        active
+                          ? 'bg-accent/15 border-accent/40 text-accent'
+                          : 'bg-surface-2 border-border text-text-muted hover:border-border hover:text-text'
+                      }`}
+                    >
+                      {tag}
+                    </button>
+                  )
+                })}
+                {tags
+                  .filter(t => !(WORKFLOW_TAG_PRESETS as readonly string[]).includes(t))
+                  .map(tag => (
+                    <button
+                      key={tag}
+                      type="button"
+                      onClick={() => toggleTag(tag)}
+                      className="px-3 py-1.5 rounded-full text-xs border bg-accent/15 border-accent/40 text-accent"
+                      title="点击移除"
+                    >
+                      {tag} ×
+                    </button>
+                  ))}
+              </div>
+              <div className="flex gap-2 items-center">
+                <input
+                  value={customTag}
+                  onChange={e => setCustomTag(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault()
+                      addCustomTag()
+                    }
+                  }}
+                  placeholder="自定义标签后回车"
+                  className="flex-1 px-3 py-2 rounded-md bg-surface-2 border border-border text-sm"
+                />
+                <Btn type="button" variant="secondary" size="sm" onClick={addCustomTag}>
+                  添加
+                </Btn>
+              </div>
+              <p className="text-[11px] text-text-muted">用于模板分类筛选（如「计划」「开发」），不参与步骤分工。</p>
+            </div>
             <label className="md:col-span-2 flex items-start gap-3 p-3 rounded-lg bg-surface-2 border border-border cursor-pointer">
               <input
                 type="checkbox"
@@ -350,7 +494,7 @@ export function WorkflowFormPage() {
                   />
                 </label>
                 <label className="block text-xs text-text-muted lg:col-span-2">
-                  标签
+                  步骤名
                   <input
                     value={row.label}
                     onChange={e => updateStep(index, { label: e.target.value })}
@@ -358,7 +502,31 @@ export function WorkflowFormPage() {
                     className="mt-1 w-full px-3 py-2 rounded-md bg-surface-2 border border-border text-sm"
                   />
                 </label>
-                <label className="block text-xs text-text-muted lg:col-span-3">
+                <label className="block text-xs text-text-muted lg:col-span-2">
+                  本步角色
+                  <select
+                    value={row.role}
+                    onChange={e => {
+                      const v = e.target.value
+                      if (v === '__custom__') {
+                        openCreateRoleForStep(index)
+                        return
+                      }
+                      updateStep(index, { role: v })
+                    }}
+                    className="mt-1 w-full px-3 py-2 rounded-md bg-surface-2 border border-border text-sm"
+                  >
+                    <option value="">未指定</option>
+                    {roleTemplates.map(r => (
+                      <option key={r.role} value={r.role}>{r.label}</option>
+                    ))}
+                    {row.role && !roleTemplates.some(r => r.role === row.role) && (
+                      <option value={row.role}>{row.role}（当前）</option>
+                    )}
+                    <option value="__custom__">＋ 新建角色…</option>
+                  </select>
+                </label>
+                <label className="block text-xs text-text-muted lg:col-span-2">
                   Agent
                   <select
                     required
@@ -369,12 +537,12 @@ export function WorkflowFormPage() {
                     <option value="">选择 Agent</option>
                     {agents.map(a => (
                       <option key={a.id} value={a.id}>
-                        {a.name} ({a.provider_name ?? a.provider_id})
+                        {a.name} · {a.provider_name ?? a.provider_id}
                       </option>
                     ))}
                   </select>
                 </label>
-                <label className="block text-xs text-text-muted lg:col-span-3">
+                <label className="block text-xs text-text-muted lg:col-span-2">
                   依赖步骤
                   <select
                     multiple
@@ -445,6 +613,82 @@ export function WorkflowFormPage() {
           </Btn>
         </div>
       </form>
+
+      {roleDialogStepIndex != null && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/50">
+          <div className="w-full max-w-xl rounded-xl bg-surface-1 border border-border-subtle shadow-xl max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-border-subtle sticky top-0 bg-surface-1">
+              <h2 className="text-base font-medium text-text-strong">新建角色</h2>
+              <button
+                type="button"
+                onClick={() => setRoleDialogStepIndex(null)}
+                className="p-1 rounded-md hover:bg-surface-3 text-text-muted"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={handleCreateRoleForStep} className="p-6 space-y-4">
+              {roleFormError && (
+                <div className="p-3 rounded-md bg-danger/10 border border-danger/30 text-sm text-danger">
+                  {roleFormError}
+                </div>
+              )}
+              <div className="grid grid-cols-2 gap-4">
+                <label className="block text-xs text-text-muted">
+                  code
+                  <input
+                    required
+                    value={roleForm.code}
+                    onChange={e => setRoleForm(f => ({ ...f, code: e.target.value }))}
+                    className="mt-1 w-full px-3 py-2 rounded-md bg-surface-2 border border-border text-sm font-mono"
+                  />
+                </label>
+                <label className="block text-xs text-text-muted">
+                  名称
+                  <input
+                    required
+                    value={roleForm.name}
+                    onChange={e => setRoleForm(f => ({ ...f, name: e.target.value }))}
+                    className="mt-1 w-full px-3 py-2 rounded-md bg-surface-2 border border-border text-sm"
+                  />
+                </label>
+              </div>
+              <label className="block text-xs text-text-muted">
+                描述
+                <textarea
+                  value={roleForm.description}
+                  onChange={e => setRoleForm(f => ({ ...f, description: e.target.value }))}
+                  rows={2}
+                  className="mt-1 w-full px-3 py-2 rounded-md bg-surface-2 border border-border text-sm"
+                />
+              </label>
+              <label className="block text-xs text-text-muted">
+                系统提示词
+                <textarea
+                  value={roleForm.system_prompt}
+                  onChange={e => setRoleForm(f => ({ ...f, system_prompt: e.target.value }))}
+                  rows={4}
+                  className="mt-1 w-full px-3 py-2 rounded-md bg-surface-2 border border-border text-sm font-mono text-xs"
+                />
+              </label>
+              <div className="flex justify-end gap-2 pt-2">
+                <Btn
+                  variant="secondary"
+                  size="sm"
+                  type="button"
+                  onClick={() => setRoleDialogStepIndex(null)}
+                  disabled={roleSubmitting}
+                >
+                  取消
+                </Btn>
+                <Btn variant="primary" size="sm" type="submit" disabled={roleSubmitting}>
+                  {roleSubmitting ? '创建中…' : '创建并选用'}
+                </Btn>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

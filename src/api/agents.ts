@@ -1,11 +1,11 @@
 import { apiFetch } from './client'
-import type { ApiAgent, ApiRoleTemplate, ListResponse } from './types'
+import type { ApiAgent, ListResponse } from './types'
 
 export interface CreateAgentInput {
   name: string
   provider_id: string
   model?: string
-  role: string
+  role?: string
   system_prompt?: string
   workspace_path?: string
   permissions?: {
@@ -48,8 +48,4 @@ export function updateAgent(agentId: string, body: UpdateAgentInput) {
 
 export function deleteAgent(agentId: string) {
   return apiFetch<void>(`/agents/${agentId}`, { method: 'DELETE' })
-}
-
-export function listRoleTemplates() {
-  return apiFetch<ListResponse<ApiRoleTemplate>>('/agents/roles/templates')
 }

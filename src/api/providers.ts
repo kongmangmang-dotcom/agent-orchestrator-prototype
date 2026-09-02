@@ -11,8 +11,16 @@ export interface CreateProviderInput {
   capabilities?: string[]
 }
 
+export type UpdateProviderInput = Partial<CreateProviderInput> & {
+  status?: string
+}
+
 export function listProviders() {
   return apiFetch<ListResponse<ApiProvider>>('/providers')
+}
+
+export function getProvider(id: string) {
+  return apiFetch<ApiProvider>(`/providers/${id}`)
 }
 
 export function createProvider(body: CreateProviderInput) {
@@ -20,6 +28,17 @@ export function createProvider(body: CreateProviderInput) {
     method: 'POST',
     body: JSON.stringify(body),
   })
+}
+
+export function updateProvider(id: string, body: UpdateProviderInput) {
+  return apiFetch<ApiProvider>(`/providers/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+}
+
+export function deleteProvider(id: string) {
+  return apiFetch<void>(`/providers/${id}`, { method: 'DELETE' })
 }
 
 export function testProvider(id: string) {

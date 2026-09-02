@@ -1,17 +1,16 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { createAgent, deleteAgent, listAgents, listRoleTemplates, updateAgent } from '../api/agents'
+import { createAgent, deleteAgent, listAgents, updateAgent } from '../api/agents'
 import { listProviders } from '../api/providers'
 import { createRun } from '../api/runs'
-import { permissionsForUi, roleLabel } from '../api/labels'
-import type { ApiAgent, ApiProvider, ApiRoleTemplate } from '../api/types'
+import { permissionsForUi } from '../api/labels'
+import type { ApiAgent, ApiProvider } from '../api/types'
 import { PageHeader, Badge, Btn, SectionTitle, PermissionGrid, Toggle } from '../components/ui'
 import { Plus, RefreshCw, Play, X, Pencil, Trash2 } from 'lucide-react'
 
 const defaultForm = () => ({
   name: '',
   provider_id: '',
-  role: 'developer',
   model: 'default',
   workspace_path: 'workspace/demo',
   system_prompt: '',
@@ -31,7 +30,6 @@ function agentToForm(agent: ApiAgent) {
   return {
     name: agent.name,
     provider_id: agent.provider_id,
-    role: agent.role,
     model: agent.model,
     workspace_path: agent.workspace_path,
     system_prompt: agent.system_prompt,
@@ -50,7 +48,7 @@ function formPayload(form: ReturnType<typeof defaultForm>) {
   return {
     name: form.name.trim(),
     provider_id: form.provider_id,
-    role: form.role,
+    role: '', // 角色在工作流步骤配置，不在 Agent 上绑定
     model: form.model,
     workspace_path: form.workspace_path,
     system_prompt: form.system_prompt,
@@ -73,7 +71,6 @@ export function AgentsPage() {
   const navigate = useNavigate()
   const [agents, setAgents] = useState<ApiAgent[]>([])
   const [providers, setProviders] = useState<ApiProvider[]>([])
-  const [roleTemplates, setRoleTemplates] = useState<ApiRoleTemplate[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -91,13 +88,8 @@ export function AgentsPage() {
     setLoading(true)
     setError(null)
     try {
-      const [agentRes, roleRes, providerRes] = await Promise.all([
-        listAgents(),
-        listRoleTemplates(),
-        listProviders(),
-      ])
+      const [agentRes, providerRes] = await Promise.all([listAgents(), listProviders()])
       setAgents(agentRes.items)
-      setRoleTemplates(roleRes.items)
       setProviders(providerRes.items)
       if (agentRes.items.length > 0 && !selectedId) {
         setSelectedId(agentRes.items[0].id)
@@ -140,17 +132,6 @@ export function AgentsPage() {
     setFormError(null)
     setShowForm(true)
     setSelectedId(agent.id)
-  }
-
-  function applyRole(role: string) {
-    const tpl = roleTemplates.find(r => r.role === role)
-    const match = providers.find(p => p.kind === tpl?.default_provider_kind)
-    setForm(f => ({
-      ...f,
-      role,
-      provider_id: match?.id ?? f.provider_id,
-      model: match?.default_model || f.model,
-    }))
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -218,7 +199,7 @@ export function AgentsPage() {
     <div className="space-y-12">
       <PageHeader
         title="Agent 管理"
-        description="每个 Agent 由配置生成，不写死。角色可绑定不同 Provider（Codex / Cursor / Demo CLI）。"
+        description="配置可执行能力（Provider、工作区、权限）。角色在工作流步骤里指定，不在 Agent 上绑定。"
         action={
           <div className="flex gap-2">
             <Btn variant="secondary" size="sm" onClick={load} disabled={loading}>
@@ -261,41 +242,27 @@ export function AgentsPage() {
                   className="mt-1 w-full px-3 py-2 rounded-md bg-surface-2 border border-border text-sm"
                 />
               </label>
-              <div className="grid grid-cols-2 gap-4">
-                <label className="block text-xs text-text-muted">
-                  角色
-                  <select
-                    value={form.role}
-                    onChange={e => applyRole(e.target.value)}
-                    className="mt-1 w-full px-3 py-2 rounded-md bg-surface-2 border border-border text-sm"
-                  >
-                    {roleTemplates.map(r => (
-                      <option key={r.role} value={r.role}>{r.label}</option>
-                    ))}
-                  </select>
-                </label>
-                <label className="block text-xs text-text-muted">
-                  Provider
-                  <select
-                    required
-                    value={form.provider_id}
-                    onChange={e => {
-                      const p = providers.find(x => x.id === e.target.value)
-                      setForm(f => ({
-                        ...f,
-                        provider_id: e.target.value,
-                        model: p?.default_model || f.model,
-                      }))
-                    }}
-                    className="mt-1 w-full px-3 py-2 rounded-md bg-surface-2 border border-border text-sm"
-                  >
-                    <option value="">选择 Provider</option>
-                    {providers.map(p => (
-                      <option key={p.id} value={p.id}>{p.name} ({p.kind})</option>
-                    ))}
-                  </select>
-                </label>
-              </div>
+              <label className="block text-xs text-text-muted">
+                Provider
+                <select
+                  required
+                  value={form.provider_id}
+                  onChange={e => {
+                    const p = providers.find(x => x.id === e.target.value)
+                    setForm(f => ({
+                      ...f,
+                      provider_id: e.target.value,
+                      model: p?.default_model || f.model,
+                    }))
+                  }}
+                  className="mt-1 w-full px-3 py-2 rounded-md bg-surface-2 border border-border text-sm"
+                >
+                  <option value="">选择 Provider</option>
+                  {providers.map(p => (
+                    <option key={p.id} value={p.id}>{p.name} ({p.kind})</option>
+                  ))}
+                </select>
+              </label>
               <div className="grid grid-cols-2 gap-4">
                 <label className="block text-xs text-text-muted">
                   模型
@@ -315,6 +282,16 @@ export function AgentsPage() {
                   />
                 </label>
               </div>
+              <label className="block text-xs text-text-muted">
+                系统提示词（可选）
+                <textarea
+                  value={form.system_prompt}
+                  onChange={e => setForm(f => ({ ...f, system_prompt: e.target.value }))}
+                  rows={3}
+                  placeholder="可选。角色职责请在工作流步骤里配置。"
+                  className="mt-1 w-full px-3 py-2 rounded-md bg-surface-2 border border-border text-sm"
+                />
+              </label>
               <div className="grid grid-cols-2 gap-3 text-sm">
                 {[
                   ['read_files', '读取文件'],
@@ -344,26 +321,12 @@ export function AgentsPage() {
         </div>
       )}
 
-      <SectionTitle>角色模板</SectionTitle>
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-2">
-        {roleTemplates.map(r => (
-          <div key={r.role} className="p-6 rounded-xl bg-surface-1 border border-border-subtle shadow-sm">
-            <div className="flex items-center justify-between mb-1.5">
-              <span className="text-sm font-medium text-text-strong">{r.label}</span>
-              <Badge variant="accent">{r.default_provider_kind}</Badge>
-            </div>
-            <p className="text-xs text-text-muted leading-relaxed">{r.desc}</p>
-          </div>
-        ))}
-      </div>
-
       <SectionTitle>已配置 Agent {loading ? '（加载中…）' : `（${agents.length}）`}</SectionTitle>
       <div className="border border-border-subtle rounded-xl overflow-hidden shadow-sm mb-2">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-border-subtle bg-surface-2 text-left text-xs text-text-muted">
               <th className="px-5 py-4 font-medium">名称</th>
-              <th className="px-5 py-4 font-medium">角色</th>
               <th className="px-5 py-4 font-medium">Provider</th>
               <th className="px-5 py-4 font-medium">模型</th>
               <th className="px-5 py-4 font-medium">工作区</th>
@@ -373,7 +336,7 @@ export function AgentsPage() {
           <tbody>
             {!loading && agents.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-5 py-8 text-center text-text-muted">
+                <td colSpan={5} className="px-5 py-8 text-center text-text-muted">
                   暂无 Agent，点击「新建 Agent」创建
                 </td>
               </tr>
@@ -387,7 +350,6 @@ export function AgentsPage() {
                 }`}
               >
                 <td className="px-5 py-4 font-mono text-xs text-text-strong">{a.name}</td>
-                <td className="px-5 py-4"><Badge>{roleLabel[a.role] ?? a.role}</Badge></td>
                 <td className="px-5 py-4 text-text">{a.provider_name ?? a.provider_id}</td>
                 <td className="px-5 py-4 text-text-muted">{a.model || '—'}</td>
                 <td className="px-5 py-4 font-mono text-xs text-text">{a.workspace_path || '—'}</td>
@@ -465,41 +427,18 @@ export function AgentsPage() {
 {`name: ${selected.name}
 provider: ${selected.provider_name ?? selected.provider_id}
 model: ${selected.model}
-role: ${selected.role}
 workspace: ${selected.workspace_path || '—'}
-permissions:
-  read_files: ${selected.permissions.read_files ?? false}
-  write_files: ${selected.permissions.write_files ?? false}
-  run_tests: ${selected.permissions.run_tests ?? false}
-  network: ${selected.permissions.network ?? false}
-limits:
-  timeout_minutes: ${selected.limits.timeout_minutes ?? 30}
-  max_rounds: ${selected.limits.max_rounds ?? 3}
-streaming: ${selected.streaming}`}
+streaming: ${selected.streaming}
+role: （由工作流步骤指定）`}
             </pre>
-            <div className="space-y-4">
-              <div>
-                <div className="text-xs text-text-muted mb-2">权限</div>
+            <div className="space-y-6">
+              <div className="p-6 rounded-xl bg-surface-1 border border-border-subtle shadow-sm">
+                <div className="text-xs text-text-muted mb-3">权限</div>
                 <PermissionGrid permissions={perms} />
               </div>
-              <div>
-                <div className="text-xs text-text-muted mb-2">运行选项</div>
-                <div className="space-y-2">
-                  <Toggle checked={perms.writeFiles} label="允许修改代码" />
-                  <Toggle checked={perms.runCommands} label="允许执行命令" />
-                  <Toggle checked={perms.network} label="允许联网" />
-                  <Toggle checked={false} label="需要人工审批" />
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3 text-sm">
-                <div className="p-3 rounded-lg bg-surface-1 border border-border-subtle">
-                  <div className="text-xs text-text-muted">超时</div>
-                  <div className="text-text-strong mt-0.5">{selected.limits.timeout_minutes ?? 30} 分钟</div>
-                </div>
-                <div className="p-3 rounded-lg bg-surface-1 border border-border-subtle">
-                  <div className="text-xs text-text-muted">最大轮次</div>
-                  <div className="text-text-strong mt-0.5">{selected.limits.max_rounds ?? 3}</div>
-                </div>
+              <div className="p-6 rounded-xl bg-surface-1 border border-border-subtle shadow-sm flex items-center justify-between">
+                <span className="text-sm text-text">流式输出</span>
+                <Toggle checked={selected.streaming} />
               </div>
             </div>
           </div>

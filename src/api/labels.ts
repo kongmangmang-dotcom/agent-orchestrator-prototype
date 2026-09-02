@@ -15,12 +15,19 @@ export const roleLabel: Record<string, string> = {
   integrator: 'Integrator',
 }
 
-export function permissionsForUi(perms: Record<string, boolean>) {
+export function displayRole(role?: string | null) {
+  const key = (role || '').trim()
+  if (!key) return '未指定'
+  return roleLabel[key] ?? key
+}
+
+export function permissionsForUi(perms?: Record<string, boolean> | null) {
+  const p = perms ?? {}
   return {
-    readFiles: perms.read_files ?? false,
-    writeFiles: perms.write_files ?? false,
-    runCommands: perms.run_commands ?? false,
-    runTests: perms.run_tests ?? false,
-    network: perms.network ?? false,
+    readFiles: p.read_files ?? false,
+    writeFiles: p.write_files ?? false,
+    runCommands: p.run_commands ?? false,
+    runTests: p.run_tests ?? false,
+    network: p.network ?? false,
   }
 }

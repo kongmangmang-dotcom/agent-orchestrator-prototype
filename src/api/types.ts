@@ -30,6 +30,19 @@ export interface ApiAgent {
   updated_at: string
 }
 
+export interface ApiRole {
+  id: string
+  code: string
+  name: string
+  description: string
+  system_prompt: string
+  default_provider_kind: string
+  sort_order: number
+  is_builtin: boolean
+  created_at: string
+  updated_at: string
+}
+
 export interface ApiRoleTemplate {
   role: string
   label: string
@@ -42,6 +55,7 @@ export interface ApiWorkflowDefinitionSummary {
   name: string
   title: string
   description: string
+  tags: string[]
   step_count: number
   created_at: string
 }
@@ -52,6 +66,7 @@ export interface ApiWorkflowStepDef {
   label: string
   agent_id: string
   agent_name: string | null
+  role: string
   depends_on: string[]
   parallel: boolean
   sort_order: number
@@ -62,6 +77,7 @@ export interface ApiWorkflowDefinition {
   name: string
   title: string
   description: string
+  tags: string[]
   options: Record<string, unknown>
   created_at: string
   steps: ApiWorkflowStepDef[]
@@ -71,6 +87,7 @@ export interface CreateWorkflowStepInput {
   step_key: string
   label: string
   agent_id: string
+  role?: string
   depends_on?: string[]
   parallel?: boolean
   sort_order?: number
@@ -80,6 +97,7 @@ export interface CreateWorkflowDefinitionInput {
   name: string
   title: string
   description?: string
+  tags?: string[]
   options?: Record<string, unknown>
   steps: CreateWorkflowStepInput[]
 }
@@ -88,6 +106,7 @@ export interface UpdateWorkflowDefinitionInput {
   name?: string
   title?: string
   description?: string
+  tags?: string[]
   options?: Record<string, unknown>
   steps?: CreateWorkflowStepInput[]
 }
@@ -102,6 +121,7 @@ export interface ApiWorkflowStepRun {
   agent_id: string
   agent_name: string | null
   provider_name: string | null
+  role?: string
   depends_on: string[]
   parallel: boolean
   status: string

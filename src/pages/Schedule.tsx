@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { PageHeader, Badge, Btn, StatusDot } from '../components/ui'
 import { MarkdownPreview } from '../components/MarkdownPreview'
@@ -17,7 +17,6 @@ import {
   getDayOverview,
   getLatestTaskAgentChat,
   listDailyTasks,
-  planToday,
   regeneratePlan,
   startTaskWorkflow,
   taskAgentChat,
@@ -33,10 +32,16 @@ import {
 import { listWorkflowDefinitions } from '../api/workflows'
 import type { ApiWorkflowDefinitionSummary } from '../api/types'
 import {
-  Sparkles, Code2, CheckCircle2, Circle, Loader2,
+  Code2, CheckCircle2, Circle, Loader2,
   RefreshCw, Bot, Clock, ArrowRight, ListTodo, Plus, Trash2, Play,
   FileText, Pin, Eye, X, MessageSquare, Minus,
 } from 'lucide-react'
+
+function deriveTaskTitle(requirement: string, fallback = '未命名任务') {
+  const line = (requirement || '').trim().split(/\r?\n/)[0]?.trim() ?? ''
+  if (!line) return fallback
+  return line.length > 80 ? `${line.slice(0, 80)}…` : line
+}
 
 const statusBadge = {
   done: { label: '已完成', variant: 'success' as const },
@@ -67,6 +72,40 @@ function formatUpdated(iso: string | null) {
   })
 }
 
+function looksLikeFilePath(value: string): boolean {
+  return /[\\/]/.test(value) || /\.[a-z0-9]{1,8}$/i.test(value)
+}
+
+function resolveNotePayload(
+  _noteKind: 'markdown' | 'file',
+  title: string,
+  body: string,
+  filePath: string,
+): { kind: 'markdown' | 'file'; title: string; body: string; file_path: string } | { error: string } {
+  let titleVal = title.trim()
+  let bodyVal = body.trim()
+  let pathVal = filePath.trim()
+
+  // 标题栏误填了路径时自动纠正
+  if (!pathVal && titleVal && looksLikeFilePath(titleVal)) {
+    pathVal = titleVal
+    titleVal = ''
+  }
+
+  if (pathVal) {
+    return { kind: 'file', title: titleVal || pathVal.split(/[\\/]/).pop() || pathVal, body: bodyVal, file_path: pathVal }
+  }
+  if (bodyVal || titleVal) {
+    return {
+      kind: 'markdown',
+      title: titleVal,
+      body: bodyVal || titleVal,
+      file_path: '',
+    }
+  }
+  return { error: '请填写笔记标题或正文，或上传/选择文档' }
+}
+
 export function SchedulePage() {
   const navigate = useNavigate()
   const [planDate, setPlanDate] = useState(() => {
@@ -87,10 +126,11 @@ export function SchedulePage() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [regenerating, setRegenerating] = useState(false)
-  const [newTaskTitle, setNewTaskTitle] = useState('')
-  const [aiPlanning, setAiPlanning] = useState(false)
-  const [showAiInput, setShowAiInput] = useState(false)
-  const [aiGoal, setAiGoal] = useState('')
+  const [showCreateModal, setShowCreateModal] = useState(false)
+  const [createTitle, setCreateTitle] = useState('')
+  const [createRequirement, setCreateRequirement] = useState('')
+  const [createWorkflowId, setCreateWorkflowId] = useState('')
+  const [createError, setCreateError] = useState<string | null>(null)
   const [planWorkflowId, setPlanWorkflowId] = useState('')
   const [bindWorkflowId, setBindWorkflowId] = useState('')
   const [editTitle, setEditTitle] = useState('')
@@ -99,10 +139,11 @@ export function SchedulePage() {
   const [adding, setAdding] = useState(false)
   const [startingWf, setStartingWf] = useState(false)
   const [deleting, setDeleting] = useState(false)
-  const [noteTitle, setNoteTitle] = useState('')
-  const [noteBody, setNoteBody] = useState('')
-  const [noteFilePath, setNoteFilePath] = useState('')
-  const [noteKind, setNoteKind] = useState<'markdown' | 'file'>('markdown')
+  const [noteFormKey, setNoteFormKey] = useState(0)
+  const [noteError, setNoteError] = useState<string | null>(null)
+  const noteFormRef = useRef<HTMLFormElement>(null)
+  const noteFileInputRef = useRef<HTMLInputElement>(null)
+  const noteDraftRef = useRef({ title: '', body: '', filePath: '' })
   const [memoryContent, setMemoryContent] = useState('')
   const [memoryPinned, setMemoryPinned] = useState(false)
   const [savingSide, setSavingSide] = useState(false)
@@ -114,6 +155,23 @@ export function SchedulePage() {
   const [showAgentChat, setShowAgentChat] = useState(false)
   const [agentChatCollapsed, setAgentChatCollapsed] = useState(false)
   const [chatPos, setChatPos] = useState<{ x: number; y: number } | null>(null)
+  const [chatSize, setChatSize] = useState(() => {
+    try {
+      const raw = localStorage.getItem('schedule_agent_chat_size')
+      if (raw) {
+        const parsed = JSON.parse(raw) as { w?: number; h?: number }
+        if (typeof parsed.w === 'number' && typeof parsed.h === 'number') {
+          return {
+            w: Math.min(Math.max(320, parsed.w), 1200),
+            h: Math.min(Math.max(360, parsed.h), 1000),
+          }
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    return { w: 440, h: 620 }
+  })
   const chatDragRef = useRef<{
     pointerId: number
     startX: number
@@ -121,6 +179,13 @@ export function SchedulePage() {
     origX: number
     origY: number
     moved: boolean
+  } | null>(null)
+  const chatResizeRef = useRef<{
+    pointerId: number
+    startX: number
+    startY: number
+    origW: number
+    origH: number
   } | null>(null)
   const chatWindowRef = useRef<HTMLDivElement | null>(null)
   const suppressChatClickRef = useRef(false)
@@ -130,23 +195,33 @@ export function SchedulePage() {
   const [chatSending, setChatSending] = useState(false)
   const [chatHint, setChatHint] = useState<string | null>(null)
 
+  const clampChatSize = useCallback((w: number, h: number) => {
+    const maxW = Math.max(320, window.innerWidth - 16)
+    const maxH = Math.max(360, window.innerHeight - 16)
+    return {
+      w: Math.min(Math.max(320, w), maxW),
+      h: Math.min(Math.max(360, h), maxH),
+    }
+  }, [])
+
   const clampChatPos = useCallback((x: number, y: number, el?: HTMLElement | null) => {
-    const w = el?.offsetWidth ?? (agentChatCollapsed ? 220 : 440)
-    const h = el?.offsetHeight ?? (agentChatCollapsed ? 48 : 620)
+    const w = el?.offsetWidth ?? (agentChatCollapsed ? 220 : chatSize.w)
+    const h = el?.offsetHeight ?? (agentChatCollapsed ? 48 : chatSize.h)
     const maxX = Math.max(8, window.innerWidth - w - 8)
     const maxY = Math.max(8, window.innerHeight - h - 8)
     return {
       x: Math.min(Math.max(8, x), maxX),
       y: Math.min(Math.max(8, y), maxY),
     }
-  }, [agentChatCollapsed])
+  }, [agentChatCollapsed, chatSize.h, chatSize.w])
 
   const onChatDragStart = useCallback((e: ReactPointerEvent) => {
     if (e.button !== 0) return
+    if (chatResizeRef.current) return
     const target = e.target as HTMLElement
     // Allow dragging the collapsed pill button; block other controls in the header.
     const isPill = Boolean(target.closest('[data-chat-drag="pill"]'))
-    if (!isPill && target.closest('button, select, input, textarea, a')) return
+    if (!isPill && target.closest('button, select, input, textarea, a, [data-chat-resize]')) return
     const el = chatWindowRef.current
     if (!el) return
     const rect = el.getBoundingClientRect()
@@ -164,15 +239,42 @@ export function SchedulePage() {
   }, [chatPos])
 
   const onChatDragMove = useCallback((e: ReactPointerEvent) => {
+    const resize = chatResizeRef.current
+    if (resize && resize.pointerId === e.pointerId) {
+      const next = clampChatSize(
+        resize.origW + (e.clientX - resize.startX),
+        resize.origH + (e.clientY - resize.startY),
+      )
+      setChatSize(next)
+      return
+    }
     const drag = chatDragRef.current
     if (!drag || drag.pointerId !== e.pointerId) return
     const dx = e.clientX - drag.startX
     const dy = e.clientY - drag.startY
     if (Math.abs(dx) > 2 || Math.abs(dy) > 2) drag.moved = true
     setChatPos(clampChatPos(drag.origX + dx, drag.origY + dy, chatWindowRef.current))
-  }, [clampChatPos])
+  }, [clampChatPos, clampChatSize])
 
   const onChatDragEnd = useCallback((e: ReactPointerEvent) => {
+    const resize = chatResizeRef.current
+    if (resize && resize.pointerId === e.pointerId) {
+      chatResizeRef.current = null
+      setChatSize(prev => {
+        try {
+          localStorage.setItem('schedule_agent_chat_size', JSON.stringify(prev))
+        } catch {
+          /* ignore */
+        }
+        return prev
+      })
+      try {
+        chatWindowRef.current?.releasePointerCapture(e.pointerId)
+      } catch {
+        /* ignore */
+      }
+      return
+    }
     const drag = chatDragRef.current
     if (!drag || drag.pointerId !== e.pointerId) return
     if (drag.moved) {
@@ -187,55 +289,98 @@ export function SchedulePage() {
     }
   }, [])
 
-  const chatFloatStyle: CSSProperties = chatPos
-    ? { left: chatPos.x, top: chatPos.y, right: 'auto', bottom: 'auto' }
-    : { right: 24, bottom: 24 }
+  const onChatResizeStart = useCallback((e: ReactPointerEvent) => {
+    if (e.button !== 0) return
+    e.stopPropagation()
+    e.preventDefault()
+    const el = chatWindowRef.current
+    if (!el) return
+    chatDragRef.current = null
+    chatResizeRef.current = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      origW: chatSize.w,
+      origH: chatSize.h,
+    }
+    el.setPointerCapture(e.pointerId)
+  }, [chatSize.h, chatSize.w])
 
-  const loadTasks = useCallback(async (preferId?: string | null, dateOverride?: string) => {
+  const chatFloatStyle: CSSProperties = {
+    ...(chatPos
+      ? { left: chatPos.x, top: chatPos.y, right: 'auto', bottom: 'auto' }
+      : { right: 24, bottom: 24 }),
+    ...(!agentChatCollapsed
+      ? {
+          width: Math.min(chatSize.w, typeof window !== 'undefined' ? window.innerWidth - 16 : chatSize.w),
+          height: Math.min(chatSize.h, typeof window !== 'undefined' ? window.innerHeight - 16 : chatSize.h),
+        }
+      : {}),
+  }
+
+  const loadTasks = useCallback(async (
+    preferId?: string | null,
+    dateOverride?: string,
+    opts?: { silent?: boolean },
+  ) => {
     const day = dateOverride ?? planDate
-    setLoading(true)
-    setError(null)
+    const silent = opts?.silent ?? false
+    if (!silent) {
+      setLoading(true)
+      setError(null)
+    }
     try {
       const [res, ov] = await Promise.all([listDailyTasks(day), getDayOverview(day)])
       setTasks(res.items)
       setOverview(ov)
-      const nextId =
-        (preferId && res.items.some(t => t.id === preferId) && preferId) ||
-        res.items.find(t => t.status === 'in_progress')?.id ||
-        res.items[0]?.id ||
-        null
-      setSelectedId(nextId)
+      if (!silent) {
+        const nextId =
+          (preferId && res.items.some(t => t.id === preferId) && preferId) ||
+          res.items.find(t => t.status === 'in_progress')?.id ||
+          res.items[0]?.id ||
+          null
+        setSelectedId(nextId)
+      }
       return res.items
     } catch (e) {
-      setError(e instanceof Error ? e.message : '加载计划失败')
+      if (!silent) setError(e instanceof Error ? e.message : '加载计划失败')
       return []
     } finally {
-      setLoading(false)
+      if (!silent) setLoading(false)
     }
   }, [planDate])
 
-  const loadDetail = useCallback(async (id: string) => {
-    setDetailLoading(true)
+  const loadDetail = useCallback(async (
+    id: string,
+    opts?: { silent?: boolean; syncEditors?: boolean },
+  ) => {
+    const silent = opts?.silent ?? false
+    const syncEditors = opts?.syncEditors ?? !silent
+    if (!silent) setDetailLoading(true)
     try {
       const task = await getDailyTask(id)
       setDetail(task)
-      setBindWorkflowId(task.workflow_definition_id ?? '')
-      const bound = task.bound_workflow_ids?.length
-        ? task.bound_workflow_ids
-        : (task.workflow_definition_id ? [task.workflow_definition_id] : [])
-      setBoundIds(bound)
-      setEditTitle(task.title)
-      setEditRequirement(
-        (task.requirement || '').trim() ||
-          (task.summary || '').trim() ||
-          task.title ||
-          '',
-      )
+      if (syncEditors) {
+        setBindWorkflowId(task.workflow_definition_id ?? '')
+        const bound = task.bound_workflow_ids?.length
+          ? task.bound_workflow_ids
+          : (task.workflow_definition_id ? [task.workflow_definition_id] : [])
+        setBoundIds(bound)
+        setEditTitle(task.title)
+        setEditRequirement(
+          (task.requirement || '').trim() ||
+            (task.summary || '').trim() ||
+            task.title ||
+            '',
+        )
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : '加载任务详情失败')
-      setDetail(null)
+      if (!silent) {
+        setError(e instanceof Error ? e.message : '加载任务详情失败')
+        setDetail(null)
+      }
     } finally {
-      setDetailLoading(false)
+      if (!silent) setDetailLoading(false)
     }
   }, [])
 
@@ -325,62 +470,72 @@ export function SchedulePage() {
     else setDetail(null)
   }, [selectedId, loadDetail])
 
-  // Poll plan progress while workflow is active.
+  // Poll plan progress only while a workflow/step is actively running.
+  // Do not overwrite the requirement form or toggle full-page loading.
   const planProgressKey = detail
-    ? `${detail.status}|${detail.active_workflow_run_id ?? ''}|${detail.plan_items.map(p => p.status).join(',')}`
+    ? `${detail.active_workflow_run_id ?? ''}|${detail.plan_items.map(p => p.status).join(',')}`
     : ''
   useEffect(() => {
     if (!selectedId || !detail) return
     const busy =
-      detail.status === 'in_progress' ||
       Boolean(detail.active_workflow_run_id) ||
       detail.plan_items.some(p => p.status === 'in_progress')
     if (!busy) return
     const timer = window.setInterval(() => {
-      void loadDetail(selectedId)
-      void loadTasks(selectedId)
+      void loadDetail(selectedId, { silent: true, syncEditors: false })
+      void loadTasks(selectedId, undefined, { silent: true })
     }, 3000)
     return () => window.clearInterval(timer)
   }, [selectedId, planProgressKey, loadDetail, loadTasks]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  async function handleAddManual() {
-    const title = newTaskTitle.trim()
-    if (!title || adding) return
+  function openCreateModal() {
+    setCreateTitle('')
+    setCreateRequirement('')
+    setCreateWorkflowId(planWorkflowId || workflows[0]?.id || '')
+    setCreateError(null)
+    setShowCreateModal(true)
+  }
+
+  function closeCreateModal() {
+    setShowCreateModal(false)
+    setCreateError(null)
+  }
+
+  async function handleCreateTask(e: React.FormEvent) {
+    e.preventDefault()
+    if (adding) return
+    const requirement = createRequirement.trim()
+    const title = createTitle.trim() || deriveTaskTitle(requirement)
+    if (!title.trim() && !requirement) {
+      setCreateError('请填写标题或详细需求')
+      return
+    }
     setAdding(true)
+    setCreateError(null)
     setError(null)
     try {
       const created = await createDailyTask({
-        title,
+        title: title.trim() || '未命名任务',
+        requirement,
         plan_date: planDate,
         with_plan: false,
-        workflow_definition_id: planWorkflowId || null,
+        workflow_definition_id: createWorkflowId || null,
       })
-      setNewTaskTitle('')
+      closeCreateModal()
+      setSelectedId(created.id)
+      setDetail(created)
+      setEditTitle(created.title)
+      setEditRequirement(
+        (created.requirement || '').trim() ||
+          (created.summary || '').trim() ||
+          created.title ||
+          '',
+      )
       await loadTasks(created.id)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '添加失败')
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : '创建失败')
     } finally {
       setAdding(false)
-    }
-  }
-
-  async function handleAiPlanToday() {
-    if (!showAiInput) {
-      setShowAiInput(true)
-      return
-    }
-    if (!aiGoal.trim() || aiPlanning) return
-    setAiPlanning(true)
-    setError(null)
-    try {
-      const res = await planToday(aiGoal.trim(), planWorkflowId || null, planDate)
-      setAiGoal('')
-      setShowAiInput(false)
-      await loadTasks(res.task.id)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '生成计划失败')
-    } finally {
-      setAiPlanning(false)
     }
   }
 
@@ -518,34 +673,107 @@ export function SchedulePage() {
     }
   }
 
-  async function handleAddNote() {
-    if (!selectedId || savingSide) return
-    if (noteKind === 'markdown' && !noteBody.trim() && !noteTitle.trim()) {
-      setError('请填写笔记标题或正文')
+  function readNoteFormValues() {
+    const fd = noteFormRef.current ? new FormData(noteFormRef.current) : null
+    const fromForm = {
+      title: String(fd?.get('note_title') ?? ''),
+      body: String(fd?.get('note_body') ?? ''),
+      filePath: String(fd?.get('note_file_path') ?? ''),
+    }
+    const draft = noteDraftRef.current
+    // 优先用表单当前值；若切 Tab 导致字段被卸掉读到空，则回退草稿
+    return {
+      title: fromForm.title || draft.title,
+      body: fromForm.body || draft.body,
+      filePath: fromForm.filePath || draft.filePath,
+    }
+  }
+
+  function clearNoteDraft() {
+    noteDraftRef.current = { title: '', body: '', filePath: '' }
+  }
+
+  async function submitNotePayload(payload: {
+    kind: 'markdown' | 'file'
+    title: string
+    body: string
+    file_path: string
+  }) {
+    if (!selectedId) {
+      setNoteError('请先选择或创建一个今日任务')
       return
     }
-    if (noteKind === 'file' && !noteFilePath.trim()) {
-      setError('请填写文件路径')
-      return
-    }
+    if (savingSide) return
     setSavingSide(true)
+    setNoteError(null)
     setError(null)
     try {
-      await createTaskNote(selectedId, {
-        kind: noteKind,
-        title: noteTitle.trim(),
-        body: noteBody.trim(),
-        file_path: noteFilePath.trim(),
-      })
-      setNoteTitle('')
-      setNoteBody('')
-      setNoteFilePath('')
+      await createTaskNote(selectedId, payload)
+      clearNoteDraft()
+      setNoteFormKey(k => k + 1)
       await loadDetail(selectedId)
     } catch (e) {
-      setError(e instanceof Error ? e.message : '添加笔记失败')
+      const msg = e instanceof Error ? e.message : '添加笔记失败'
+      setNoteError(msg)
+      setError(msg)
     } finally {
       setSavingSide(false)
     }
+  }
+
+  async function handleNoteFileSelect(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    if (!selectedId) {
+      setNoteError('请先选择或创建一个今日任务')
+      return
+    }
+    const name = file.name
+    const isTextLike =
+      /\.(md|markdown|txt|json|ya?ml|csv|xml|html?|log)$/i.test(name) ||
+      file.type.startsWith('text/') ||
+      file.type === 'application/json'
+    try {
+      if (isTextLike) {
+        const text = await file.text()
+        if (!text.trim()) {
+          setNoteError('文件内容为空')
+          return
+        }
+        await submitNotePayload({
+          kind: 'markdown',
+          title: name.replace(/\.[^.]+$/, '') || name,
+          body: text,
+          file_path: '',
+        })
+      } else {
+        await submitNotePayload({
+          kind: 'file',
+          title: name,
+          body: `已选择本地文件：${name}`,
+          file_path: name,
+        })
+      }
+    } catch {
+      setNoteError('读取文件失败')
+    }
+  }
+
+  async function handleAddNote(e?: { preventDefault?: () => void }) {
+    e?.preventDefault?.()
+    if (!selectedId) {
+      setNoteError('请先选择或创建一个今日任务')
+      return
+    }
+    if (savingSide) return
+    const { title, body, filePath } = readNoteFormValues()
+    const payload = resolveNotePayload('markdown', title, body, filePath)
+    if ('error' in payload) {
+      setNoteError(payload.error)
+      return
+    }
+    await submitNotePayload(payload)
   }
 
   async function handleDeleteNote(noteId: string) {
@@ -738,76 +966,86 @@ export function SchedulePage() {
           ))}
         </div>
 
-        <div className="p-4 border-t border-border-subtle space-y-3">
-          <label className="block space-y-1.5">
-            <span className="text-[11px] font-medium text-text-muted uppercase tracking-wide">开发计划工作流</span>
-            <select
-              value={planWorkflowId}
-              onChange={e => setPlanWorkflowId(e.target.value)}
-              className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-surface-2 text-sm"
-            >
-                            {workflows.map(w => (
-                <option key={w.id} value={w.id}>{w.title} ({w.step_count} 步)</option>
-              ))}
-            </select>
-          </label>
-
-          <div className="space-y-2">
-            <label className="text-[11px] font-medium text-text-muted uppercase tracking-wide">快速添加</label>
-            <div className="flex gap-2">
-              <input
-                value={newTaskTitle}
-                onChange={e => setNewTaskTitle(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handleAddManual()}
-                placeholder="输入任务标题…"
-                className="flex-1 px-3 py-2 rounded-lg border border-border-subtle bg-surface-2 text-sm"
-              />
-              <button
-                type="button"
-                onClick={handleAddManual}
-                disabled={!newTaskTitle.trim() || adding}
-                className="p-2 rounded-lg bg-surface-3 border border-border-subtle text-text-muted disabled:opacity-40"
-              >
-                <Plus className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-
-          {showAiInput ? (
-            <div className="space-y-2 p-3 rounded-lg bg-accent/5 border border-accent/20">
-              <label className="text-[11px] text-accent font-medium">详细需求</label>
-              <textarea
-                value={aiGoal}
-                onChange={e => setAiGoal(e.target.value)}
-                rows={4}
-                placeholder="描述要完成的功能、约束与验收标准…"
-                className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-surface-1 text-sm resize-none"
-              />
-              <p className="text-[11px] text-text-muted">将自动生成短标题，并按所选工作流模板展开开发计划。</p>
-              <div className="flex gap-2">
-                <Btn variant="primary" size="sm" onClick={handleAiPlanToday} disabled={aiPlanning || !aiGoal.trim()}>
-                  <Sparkles className={`w-3.5 h-3.5 ${aiPlanning ? 'animate-pulse' : ''}`} />
-                  {aiPlanning ? '生成中…' : '生成开发计划'}
-                </Btn>
-                <Btn variant="ghost" size="sm" onClick={() => { setShowAiInput(false); setAiGoal('') }}>取消</Btn>
-              </div>
-            </div>
-          ) : (
-            <Btn variant="primary" size="sm" onClick={() => setShowAiInput(true)}>
-              <Sparkles className="w-3.5 h-3.5" />
-              生成开发计划
-            </Btn>
-          )}
+        <div className="p-4 border-t border-border-subtle">
+          <Btn variant="primary" size="sm" onClick={openCreateModal}>
+            <Plus className="w-3.5 h-3.5" />
+            创建任务
+          </Btn>
         </div>
       </div>
 
       <div className="flex-1 overflow-auto px-10 py-8 min-w-0">
+        {showCreateModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40">
+            <div className="w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-xl bg-surface-1 border border-border-subtle shadow-xl">
+              <div className="flex items-center justify-between px-6 py-4 border-b border-border-subtle sticky top-0 bg-surface-1">
+                <h2 className="text-base font-medium text-text-strong">创建任务</h2>
+                <button type="button" onClick={closeCreateModal} className="p-1 rounded-md hover:bg-surface-3 text-text-muted">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <form onSubmit={handleCreateTask} className="p-6 space-y-4">
+                {createError && (
+                  <div className="p-3 rounded-md bg-danger/10 border border-danger/30 text-sm text-danger">{createError}</div>
+                )}
+                <label className="block space-y-1.5">
+                  <span className="text-xs text-text-muted">短标题</span>
+                  <input
+                    value={createTitle}
+                    onChange={e => setCreateTitle(e.target.value)}
+                    placeholder="可选；不填则从需求首行生成"
+                    className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-surface-2 text-sm"
+                  />
+                </label>
+                <label className="block space-y-1.5">
+                  <span className="text-xs text-text-muted">详细需求</span>
+                  <textarea
+                    value={createRequirement}
+                    onChange={e => setCreateRequirement(e.target.value)}
+                    rows={5}
+                    placeholder="功能目标、约束、验收标准…"
+                    className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-surface-2 text-sm resize-y min-h-[120px]"
+                  />
+                </label>
+                <label className="block space-y-1.5">
+                  <span className="text-xs text-text-muted">绑定工作流（可选）</span>
+                  <select
+                    value={createWorkflowId}
+                    onChange={e => setCreateWorkflowId(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-surface-2 text-sm"
+                  >
+                    <option value="">不绑定</option>
+                    {workflows.map(w => (
+                      <option key={w.id} value={w.id}>
+                        {w.title}
+                        {w.tags?.length ? ` [${w.tags.join('/')}]` : ''}
+                        {` (${w.step_count} 步)`}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <p className="text-[11px] text-text-muted">
+                  仅保存任务；需要计划表时可在详情里「刷新开发计划」。
+                </p>
+                <div className="flex justify-end gap-2 pt-1">
+                  <Btn variant="secondary" size="sm" type="button" onClick={closeCreateModal} disabled={adding}>
+                    取消
+                  </Btn>
+                  <Btn variant="primary" size="sm" type="submit" disabled={adding}>
+                    {adding ? '保存中…' : '保存'}
+                  </Btn>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
         {error && (
           <div className="mb-6 p-4 rounded-lg bg-danger/10 border border-danger/30 text-sm text-danger">{error}</div>
         )}
 
         {!selectedSummary && !loading && (
-          <div className="text-sm text-text-muted py-20 text-center">选择或创建一个今日任务</div>
+          <div className="text-sm text-text-muted py-20 text-center">选择左侧任务，或点击「创建任务」</div>
         )}
 
         {selectedSummary && (
@@ -855,7 +1093,7 @@ export function SchedulePage() {
             <div className="mb-6 p-4 rounded-xl bg-surface-1 border border-border-subtle space-y-3">
               <div className="text-sm font-medium text-text-strong">任务要求</div>
               <p className="text-xs text-text-muted -mt-1">
-                生成计划时填写的详细需求可在此查看与修改；启动工作流时优先使用此处内容。
+                可在此查看与修改任务要求；启动工作流时优先使用此处内容。
               </p>
               <label className="block space-y-1.5">
                 <span className="text-xs text-text-muted">短标题</span>
@@ -888,7 +1126,7 @@ export function SchedulePage() {
                   <FileText className="w-4 h-4 text-accent" />
                   笔记与文档
                 </div>
-                <p className="text-xs text-text-muted -mt-1">Markdown 笔记或登记文件路径；点击可预览。启动工作流时会带入 prompt。</p>
+                <p className="text-xs text-text-muted -mt-1">支持 Markdown 笔记、上传文本文件（选完即保存），或登记本地文件路径；点击可预览。启动工作流时会带入 prompt。</p>
                 <div className="space-y-2 max-h-56 overflow-y-auto">
                   {(detail?.notes ?? []).length === 0 && (
                     <div className="text-xs text-text-muted">暂无笔记</div>
@@ -921,44 +1159,72 @@ export function SchedulePage() {
                     </div>
                   ))}
                 </div>
-                <div className="flex gap-2">
-                  <Btn variant={noteKind === 'markdown' ? 'primary' : 'ghost'} size="sm" type="button" onClick={() => setNoteKind('markdown')}>Markdown</Btn>
-                  <Btn variant={noteKind === 'file' ? 'primary' : 'ghost'} size="sm" type="button" onClick={() => setNoteKind('file')}>文件路径</Btn>
-                </div>
-                <input
-                  value={noteTitle}
-                  onChange={e => setNoteTitle(e.target.value)}
-                  placeholder="标题（可选）"
-                  className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-surface-0 text-sm"
-                />
-                {noteKind === 'file' ? (
+                <form
+                  key={noteFormKey}
+                  ref={noteFormRef}
+                  className="space-y-2"
+                  onSubmit={e => {
+                    e.preventDefault()
+                    void handleAddNote(e)
+                  }}
+                >
+                  <div className="flex flex-wrap gap-2 items-center">
+                    <Btn
+                      variant="ghost"
+                      size="sm"
+                      type="button"
+                      disabled={savingSide || !selectedId}
+                      onClick={() => noteFileInputRef.current?.click()}
+                    >
+                      {savingSide ? '保存中…' : '上传文档'}
+                    </Btn>
+                    <input
+                      ref={noteFileInputRef}
+                      type="file"
+                      accept=".md,.markdown,.txt,.json,.yaml,.yml,.csv,.xml,.html,.htm,.log,text/*,*"
+                      className="hidden"
+                      onChange={handleNoteFileSelect}
+                    />
+                    <span className="text-[11px] text-text-muted">上传文本文件会立即保存；也可手填下方内容后点添加</span>
+                  </div>
                   <input
-                    value={noteFilePath}
-                    onChange={e => setNoteFilePath(e.target.value)}
-                    placeholder="例如 workspace/demo/docs/spec.md"
-                    className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-surface-0 text-sm font-mono"
+                    name="note_title"
+                    defaultValue=""
+                    placeholder="标题（可选）"
+                    className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-surface-0 text-sm"
+                    onInput={e => {
+                      noteDraftRef.current.title = (e.target as HTMLInputElement).value
+                      if (noteError) setNoteError(null)
+                    }}
                   />
-                ) : (
                   <textarea
-                    value={noteBody}
-                    onChange={e => setNoteBody(e.target.value)}
+                    name="note_body"
+                    defaultValue=""
                     rows={3}
                     placeholder="笔记正文…"
                     className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-surface-0 text-sm resize-y"
+                    onInput={e => {
+                      noteDraftRef.current.body = (e.target as HTMLTextAreaElement).value
+                      if (noteError) setNoteError(null)
+                    }}
                   />
-                )}
-                {noteKind === 'file' && (
-                  <textarea
-                    value={noteBody}
-                    onChange={e => setNoteBody(e.target.value)}
-                    rows={2}
-                    placeholder="说明（可选）"
-                    className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-surface-0 text-sm resize-y"
+                  <input
+                    name="note_file_path"
+                    defaultValue=""
+                    placeholder="可选：本地文件路径，例如 D:\project\docs\spec.md"
+                    className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-surface-0 text-sm font-mono"
+                    onInput={e => {
+                      noteDraftRef.current.filePath = (e.target as HTMLInputElement).value
+                      if (noteError) setNoteError(null)
+                    }}
                   />
-                )}
-                <Btn variant="secondary" size="sm" onClick={handleAddNote} disabled={savingSide || !selectedId}>
-                  <Plus className="w-3.5 h-3.5" />添加
-                </Btn>
+                  {noteError && (
+                    <div className="text-xs text-danger">{noteError}</div>
+                  )}
+                  <Btn variant="secondary" size="sm" type="submit" disabled={savingSide || !selectedId}>
+                    <Plus className="w-3.5 h-3.5" />{savingSide ? '添加中…' : '添加'}
+                  </Btn>
+                </form>
               </div>
 
               <div className="p-4 rounded-xl bg-surface-1 border border-border-subtle space-y-3">
@@ -1292,7 +1558,7 @@ export function SchedulePage() {
             onPointerMove={onChatDragMove}
             onPointerUp={onChatDragEnd}
             onPointerCancel={onChatDragEnd}
-            className="fixed z-40 w-[min(440px,calc(100vw-2rem))] h-[min(620px,calc(100vh-5rem))] flex flex-col rounded-xl bg-surface-1 border border-border shadow-2xl overflow-hidden touch-none"
+            className="fixed z-40 flex flex-col rounded-xl bg-surface-1 border border-border shadow-2xl overflow-hidden touch-none"
           >
             <div
               className="px-4 py-3 border-b border-border-subtle space-y-2 shrink-0 bg-surface-1 cursor-grab active:cursor-grabbing select-none"
@@ -1331,7 +1597,7 @@ export function SchedulePage() {
                 </div>
               </div>
               <p className="text-[11px] text-text-muted leading-snug">
-                首轮附带任务文档；同一会话后续不再重复附带。
+                首轮附带任务文档；同一会话后续不再重复附带。可拖动右下角调整窗口大小。
               </p>
               <div className="flex flex-wrap items-center gap-2">
                 <select
@@ -1382,6 +1648,22 @@ export function SchedulePage() {
                   />
                 </div>
               )}
+            </div>
+            <div
+              data-chat-resize
+              onPointerDown={onChatResizeStart}
+              title="拖动调整大小"
+              className="absolute right-0 bottom-0 w-4 h-4 cursor-nwse-resize z-10"
+              style={{ touchAction: 'none' }}
+            >
+              <svg
+                viewBox="0 0 16 16"
+                className="absolute right-1 bottom-1 w-3 h-3 text-text-muted pointer-events-none"
+                aria-hidden
+              >
+                <path d="M14 6v8H6" fill="none" stroke="currentColor" strokeWidth="1.5" />
+                <path d="M14 10v4h-4" fill="none" stroke="currentColor" strokeWidth="1.5" />
+              </svg>
             </div>
           </div>
         )

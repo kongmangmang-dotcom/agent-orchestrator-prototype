@@ -1,9 +1,15 @@
-import { useCallback, useEffect, useState } from 'react'
-import { createProvider, listProviders, testProvider } from '../api/providers'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import {
+  createProvider,
+  deleteProvider,
+  listProviders,
+  testProvider,
+  updateProvider,
+} from '../api/providers'
 import { providerTypeLabel } from '../api/labels'
 import type { ApiProvider, ProviderType } from '../api/types'
 import { PageHeader, Badge, StatusDot, Btn, SectionTitle } from '../components/ui'
-import { Plus, Zap, Code2, Server, RefreshCw, X } from 'lucide-react'
+import { Plus, Zap, Code2, Server, RefreshCw, X, Pencil, Trash2 } from 'lucide-react'
 
 const typeIcons: Record<ProviderType, typeof Zap> = {
   model_api: Zap,
@@ -42,26 +48,69 @@ const envKeyByKind: Record<string, string> = {
   codex_cli: 'OPENAI_API_KEY',
 }
 
-const emptyForm = () => ({
+type FormState = {
+  name: string
+  type: ProviderType
+  kind: string
+  endpoint: string
+  default_model: string
+  api_key_ref: string
+  cli_command: string
+  capabilities: string
+}
+
+const emptyForm = (): FormState => ({
   name: '',
-  type: 'model_api' as ProviderType,
+  type: 'model_api',
   kind: 'openai',
   endpoint: kindPresets.model_api[0].endpoint,
   default_model: kindPresets.model_api[0].default_model,
   api_key_ref: 'env:OPENAI_API_KEY',
+  cli_command: '',
   capabilities: '',
 })
+
+function formFromProvider(p: ApiProvider): FormState {
+  const cfg = p.config || {}
+  return {
+    name: p.name,
+    type: p.type,
+    kind: p.kind,
+    endpoint: p.endpoint || '',
+    default_model: p.default_model || '',
+    api_key_ref: typeof cfg.api_key_ref === 'string' ? cfg.api_key_ref : '',
+    cli_command: typeof cfg.cli_command === 'string' ? cfg.cli_command : '',
+    capabilities: (p.capabilities || []).join(', '),
+  }
+}
+
+function buildConfig(form: FormState, existing?: Record<string, unknown>) {
+  const config: Record<string, unknown> = { ...(existing || {}) }
+  if (form.api_key_ref.trim()) config.api_key_ref = form.api_key_ref.trim()
+  else delete config.api_key_ref
+  if (form.cli_command.trim()) config.cli_command = form.cli_command.trim()
+  else if (form.type !== 'coding_agent') delete config.cli_command
+  return config
+}
 
 export function ProvidersPage() {
   const [providers, setProviders] = useState<ApiProvider[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [testingId, setTestingId] = useState<string | null>(null)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
   const [testMsg, setTestMsg] = useState<string | null>(null)
   const [showForm, setShowForm] = useState(false)
+  const [editingId, setEditingId] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
-  const [form, setForm] = useState(emptyForm)
+  const [form, setForm] = useState<FormState>(emptyForm)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+
+  const selected = useMemo(
+    () => providers.find(p => p.id === selectedId) ?? null,
+    [providers, selectedId],
+  )
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -69,25 +118,40 @@ export function ProvidersPage() {
     try {
       const res = await listProviders()
       setProviders(res.items)
+      if (selectedId && !res.items.some(p => p.id === selectedId)) {
+        setSelectedId(res.items[0]?.id ?? null)
+      } else if (!selectedId && res.items.length > 0) {
+        setSelectedId(res.items[0].id)
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : '加载失败')
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [selectedId])
 
   useEffect(() => {
     load()
-  }, [load])
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  function openForm() {
+  function openCreateForm() {
+    setEditingId(null)
     setForm(emptyForm())
     setFormError(null)
     setShowForm(true)
   }
 
+  function openEditForm(provider: ApiProvider) {
+    setEditingId(provider.id)
+    setForm(formFromProvider(provider))
+    setFormError(null)
+    setShowForm(true)
+    setSelectedId(provider.id)
+  }
+
   function closeForm() {
     setShowForm(false)
+    setEditingId(null)
     setFormError(null)
   }
 
@@ -100,8 +164,8 @@ export function ProvidersPage() {
       kind,
       endpoint: preset.endpoint,
       default_model: preset.default_model,
-      name: f.name || preset.label,
-      api_key_ref: envKey ? `env:${envKey}` : '',
+      name: editingId ? f.name : f.name || preset.label,
+      api_key_ref: envKey ? `env:${envKey}` : f.api_key_ref,
     }))
   }
 
@@ -119,6 +183,22 @@ export function ProvidersPage() {
     }
   }
 
+  async function handleDelete(provider: ApiProvider) {
+    if (!confirm(`确定删除 Provider「${provider.name}」？若仍被 Agent 引用将无法删除。`)) return
+    setDeletingId(provider.id)
+    setError(null)
+    try {
+      await deleteProvider(provider.id)
+      setTestMsg(`已删除 Provider「${provider.name}」`)
+      if (selectedId === provider.id) setSelectedId(null)
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '删除失败')
+    } finally {
+      setDeletingId(null)
+    }
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!form.name.trim()) {
@@ -128,27 +208,41 @@ export function ProvidersPage() {
     setSubmitting(true)
     setFormError(null)
     try {
-      await createProvider({
+      const existing = editingId
+        ? providers.find(p => p.id === editingId)?.config
+        : undefined
+      const payload = {
         kind: form.kind,
         type: form.type,
         name: form.name.trim(),
         endpoint: form.endpoint.trim(),
         default_model: form.default_model.trim(),
-        config: form.api_key_ref.trim() ? { api_key_ref: form.api_key_ref.trim() } : {},
+        config: buildConfig(form, existing),
         capabilities: form.capabilities
           .split(/[,，、]/)
           .map(s => s.trim())
           .filter(Boolean),
-      })
+      }
+      if (editingId) {
+        const updated = await updateProvider(editingId, payload)
+        setTestMsg(`已更新 Provider「${updated.name}」`)
+        setSelectedId(updated.id)
+      } else {
+        const created = await createProvider(payload)
+        setTestMsg(`已添加 Provider「${created.name}」`)
+        setSelectedId(created.id)
+      }
       closeForm()
-      setTestMsg(`已添加 Provider「${form.name.trim()}」`)
       await load()
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : '创建失败')
+      setFormError(err instanceof Error ? err.message : editingId ? '保存失败' : '创建失败')
     } finally {
       setSubmitting(false)
     }
   }
+
+  const kindOptions = kindPresets[form.type]
+  const kindKnown = kindOptions.some(p => p.kind === form.kind)
 
   return (
     <div className="space-y-12">
@@ -161,7 +255,7 @@ export function ProvidersPage() {
               <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
               刷新
             </Btn>
-            <Btn variant="primary" size="sm" onClick={openForm}>
+            <Btn variant="primary" size="sm" onClick={openCreateForm}>
               <Plus className="w-3.5 h-3.5" />添加 Provider
             </Btn>
           </div>
@@ -170,7 +264,7 @@ export function ProvidersPage() {
 
       {error && (
         <div className="p-4 rounded-lg bg-danger/10 border border-danger/30 text-sm text-danger">
-          {error} — 请确认后端已启动（localhost:8001）
+          {error}
         </div>
       )}
       {testMsg && (
@@ -182,14 +276,14 @@ export function ProvidersPage() {
       {showForm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40">
           <div
-            className="w-full max-w-lg rounded-xl bg-surface-1 border border-border-subtle shadow-xl"
+            className="w-full max-w-lg rounded-xl bg-surface-1 border border-border-subtle shadow-xl max-h-[90vh] overflow-y-auto"
             role="dialog"
             aria-modal="true"
-            aria-labelledby="add-provider-title"
+            aria-labelledby="provider-form-title"
           >
-            <div className="flex items-center justify-between px-6 py-4 border-b border-border-subtle">
-              <h2 id="add-provider-title" className="text-base font-medium text-text-strong">
-                添加 Provider
+            <div className="flex items-center justify-between px-6 py-4 border-b border-border-subtle sticky top-0 bg-surface-1">
+              <h2 id="provider-form-title" className="text-base font-medium text-text-strong">
+                {editingId ? '编辑 Provider' : '添加 Provider'}
               </h2>
               <button
                 type="button"
@@ -225,16 +319,32 @@ export function ProvidersPage() {
                 <label className="block text-xs text-text-muted">
                   Kind
                   <select
-                    value={form.kind}
-                    onChange={e => applyKindPreset(form.type, e.target.value)}
+                    value={kindKnown ? form.kind : '__custom__'}
+                    onChange={e => {
+                      if (e.target.value === '__custom__') return
+                      applyKindPreset(form.type, e.target.value)
+                    }}
                     className="mt-1 w-full px-3 py-2 rounded-md bg-surface-2 border border-border text-text-strong text-sm"
                   >
-                    {kindPresets[form.type].map(p => (
+                    {kindOptions.map(p => (
                       <option key={p.kind} value={p.kind}>{p.label}</option>
                     ))}
+                    {!kindKnown && (
+                      <option value="__custom__">{form.kind}（当前）</option>
+                    )}
                   </select>
                 </label>
               </div>
+              {!kindKnown && (
+                <label className="block text-xs text-text-muted">
+                  Kind（自定义）
+                  <input
+                    value={form.kind}
+                    onChange={e => setForm(f => ({ ...f, kind: e.target.value }))}
+                    className="mt-1 w-full px-3 py-2 rounded-md bg-surface-2 border border-border text-text-strong text-sm font-mono"
+                  />
+                </label>
+              )}
               <label className="block text-xs text-text-muted">
                 名称
                 <input
@@ -273,6 +383,17 @@ export function ProvidersPage() {
                   />
                 </label>
               </div>
+              {form.type === 'coding_agent' && (
+                <label className="block text-xs text-text-muted">
+                  CLI 可执行路径（可选）
+                  <input
+                    value={form.cli_command}
+                    onChange={e => setForm(f => ({ ...f, cli_command: e.target.value }))}
+                    placeholder="例如 C:\nvm4w\nodejs\codex.cmd"
+                    className="mt-1 w-full px-3 py-2 rounded-md bg-surface-2 border border-border text-text-strong text-sm font-mono text-xs"
+                  />
+                </label>
+              )}
               <label className="block text-xs text-text-muted">
                 能力标签（逗号分隔）
                 <input
@@ -287,7 +408,7 @@ export function ProvidersPage() {
                   取消
                 </Btn>
                 <Btn variant="primary" size="sm" type="submit" disabled={submitting}>
-                  {submitting ? '提交中…' : '创建'}
+                  {submitting ? (editingId ? '保存中…' : '提交中…') : editingId ? '保存' : '创建'}
                 </Btn>
               </div>
             </form>
@@ -326,21 +447,26 @@ export function ProvidersPage() {
               <th className="px-5 py-4 font-medium">Kind</th>
               <th className="px-5 py-4 font-medium">接入点</th>
               <th className="px-5 py-4 font-medium">默认模型</th>
-              <th className="px-5 py-4 font-medium">能力</th>
               <th className="px-5 py-4 font-medium">状态</th>
-              <th className="px-5 py-4 font-medium"></th>
+              <th className="px-5 py-4 font-medium w-40">操作</th>
             </tr>
           </thead>
           <tbody>
             {!loading && providers.length === 0 && (
               <tr>
-                <td colSpan={8} className="px-5 py-8 text-center text-text-muted">
+                <td colSpan={7} className="px-5 py-8 text-center text-text-muted">
                   暂无 Provider，点击「添加 Provider」创建
                 </td>
               </tr>
             )}
             {providers.map(p => (
-              <tr key={p.id} className="border-b border-border-subtle last:border-0 hover:bg-surface-2/50">
+              <tr
+                key={p.id}
+                onClick={() => setSelectedId(p.id)}
+                className={`border-b border-border-subtle last:border-0 hover:bg-surface-2/50 cursor-pointer ${
+                  selected?.id === p.id ? 'bg-accent/5' : ''
+                }`}
+              >
                 <td className="px-5 py-4 font-medium text-text-strong">{p.name}</td>
                 <td className="px-5 py-4">
                   <Badge variant={typeColors[p.type]}>{providerTypeLabel[p.type]}</Badge>
@@ -348,9 +474,6 @@ export function ProvidersPage() {
                 <td className="px-5 py-4 font-mono text-xs text-text-muted">{p.kind}</td>
                 <td className="px-5 py-4 font-mono text-xs text-text">{p.endpoint || '—'}</td>
                 <td className="px-5 py-4 text-text">{p.default_model || '—'}</td>
-                <td className="px-5 py-4 text-xs text-text-muted">
-                  {p.capabilities.join(' · ') || '—'}
-                </td>
                 <td className="px-5 py-4">
                   <div className="flex items-center gap-2">
                     <StatusDot status={p.status === 'connected' ? 'connected' : 'disconnected'} />
@@ -358,20 +481,79 @@ export function ProvidersPage() {
                   </div>
                 </td>
                 <td className="px-5 py-4">
-                  <Btn
-                    variant="ghost"
-                    size="sm"
-                    disabled={testingId === p.id}
-                    onClick={() => handleTest(p.id)}
-                  >
-                    {testingId === p.id ? '测试中…' : '测试连接'}
-                  </Btn>
+                  <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
+                    <Btn
+                      variant="ghost"
+                      size="sm"
+                      disabled={testingId === p.id}
+                      onClick={() => handleTest(p.id)}
+                    >
+                      {testingId === p.id ? '测试中…' : '测试'}
+                    </Btn>
+                    <button
+                      type="button"
+                      title="编辑"
+                      onClick={() => openEditForm(p)}
+                      className="p-1.5 rounded-md hover:bg-surface-3 text-text-muted hover:text-text transition-colors"
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      title="删除"
+                      disabled={deletingId === p.id}
+                      onClick={() => handleDelete(p)}
+                      className="p-1.5 rounded-md hover:bg-danger/10 text-text-muted hover:text-danger transition-colors disabled:opacity-50"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+
+      {selected && (
+        <>
+          <SectionTitle>
+            <span className="flex items-center justify-between gap-4 flex-wrap">
+              <span>配置详情 — {selected.name}</span>
+              <span className="flex gap-2">
+                <Btn variant="secondary" size="sm" onClick={() => openEditForm(selected)}>
+                  <Pencil className="w-3.5 h-3.5" />编辑
+                </Btn>
+                <Btn
+                  variant="danger"
+                  size="sm"
+                  onClick={() => handleDelete(selected)}
+                  disabled={deletingId === selected.id}
+                >
+                  <Trash2 className="w-3.5 h-3.5" />删除
+                </Btn>
+              </span>
+            </span>
+          </SectionTitle>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            <pre className="p-6 rounded-xl bg-surface-1 border border-border-subtle font-mono text-xs text-text leading-relaxed overflow-x-auto shadow-sm">
+{`id: ${selected.id}
+name: ${selected.name}
+type: ${selected.type}
+kind: ${selected.kind}
+endpoint: ${selected.endpoint || '—'}
+default_model: ${selected.default_model || '—'}
+status: ${selected.status}
+capabilities: ${(selected.capabilities || []).join(', ') || '—'}
+updated_at: ${selected.updated_at}`}
+            </pre>
+            <pre className="p-6 rounded-xl bg-surface-1 border border-border-subtle font-mono text-xs text-text leading-relaxed overflow-x-auto shadow-sm">
+{`config:
+${JSON.stringify(selected.config || {}, null, 2)}`}
+            </pre>
+          </div>
+        </>
+      )}
     </div>
   )
 }
