@@ -7,6 +7,7 @@ import {
   getWorkflowRun,
   listWorkflowDefinitions,
   startWorkflowRun,
+  continueWorkflowRun,
 } from '../api/workflows'
 import type {
   ApiAgent,
@@ -19,7 +20,8 @@ import { PageHeader, Badge, Btn, SectionTitle, StatusDot } from '../components/u
 import { WorkflowDAG } from '../components/WorkflowDAG'
 import { LiveRunPanel } from '../components/LiveRunPanel'
 import type { WorkflowStep } from '../data/mock'
-import { Plus, GitBranch, Trash2, RefreshCw, Play, Loader2, Pencil, Activity } from 'lucide-react'
+import { Plus, GitBranch, Trash2, RefreshCw, Play, Loader2, Pencil, Activity, CornerDownRight } from 'lucide-react'
+import { ingestWorkflowNotifications } from '../lib/appToast'
 
 function formatCreated(iso: string) {
   return new Date(iso).toLocaleString('zh-CN', {
@@ -47,6 +49,7 @@ export function WorkflowsPage() {
   const [taskPrompt, setTaskPrompt] = useState('')
   const [workspacePath, setWorkspacePath] = useState('workspace/demo')
   const [startingRun, setStartingRun] = useState(false)
+  const [continuingRun, setContinuingRun] = useState(false)
   const [tagFilter, setTagFilter] = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -152,6 +155,28 @@ export function WorkflowsPage() {
   }, [detail, agentsById, activeRun])
 
   const runTerminal = activeRun?.status === 'completed' || activeRun?.status === 'failed' || activeRun?.status === 'cancelled'
+  const runWaiting = activeRun?.status === 'waiting_approval'
+
+  useEffect(() => {
+    if (!activeRun) return
+    ingestWorkflowNotifications({
+      runId: activeRun.id,
+      workflowId: activeRun.workflow_id,
+      dailyTaskId: activeRun.daily_task_id,
+      notifications: activeRun.step_notifications ?? [],
+      onContinue: async runId => {
+        setContinuingRun(true)
+        try {
+          const run = await continueWorkflowRun(runId)
+          setActiveRun(run)
+        } catch (e) {
+          setError(e instanceof Error ? e.message : '继续工作流失败')
+        } finally {
+          setContinuingRun(false)
+        }
+      },
+    })
+  }, [activeRun?.id, activeRun?.step_notifications, activeRun?.status])
 
   useEffect(() => {
     if (!activeRun || runTerminal) {
@@ -417,6 +442,29 @@ export function WorkflowsPage() {
                     )}
                     启动 Run
                   </Btn>
+                  {runWaiting && activeRun && (
+                    <Btn
+                      variant="primary"
+                      size="sm"
+                      disabled={continuingRun}
+                      onClick={() => {
+                        void (async () => {
+                          setContinuingRun(true)
+                          try {
+                            const run = await continueWorkflowRun(activeRun.id)
+                            setActiveRun(run)
+                          } catch (e) {
+                            setError(e instanceof Error ? e.message : '继续工作流失败')
+                          } finally {
+                            setContinuingRun(false)
+                          }
+                        })()
+                      }}
+                    >
+                      <CornerDownRight className="w-3.5 h-3.5" />
+                      {continuingRun ? '继续中…' : '继续下一步'}
+                    </Btn>
+                  )}
                   {activeRun && runTerminal && (
                     <Btn
                       variant="secondary"
@@ -431,6 +479,15 @@ export function WorkflowsPage() {
                   )}
                 </div>
               </div>
+              {runWaiting && (
+                <div className="text-xs text-accent">
+                  工作流已暂停等待确认
+                  {activeRun?.paused_after_steps?.length
+                    ? `（步骤：${activeRun.paused_after_steps.join(', ')}）`
+                    : ''}
+                  。可检查产物后点击「继续下一步」。
+                </div>
+              )}
               {activeRun?.error_message && (
                 <div className="text-xs text-danger">{activeRun.error_message}</div>
               )}

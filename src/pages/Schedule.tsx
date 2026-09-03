@@ -10,9 +10,11 @@ import {
   createDailyTask,
   createTaskMemory,
   createTaskNote,
+  continueDailyTask,
   deleteDailyTask,
   deleteTaskMemory,
   deleteTaskNote,
+  downloadTaskNote,
   getDailyTask,
   getDayOverview,
   getLatestTaskAgentChat,
@@ -34,7 +36,7 @@ import type { ApiWorkflowDefinitionSummary } from '../api/types'
 import {
   Code2, CheckCircle2, Circle, Loader2,
   RefreshCw, Bot, Clock, ArrowRight, ListTodo, Plus, Trash2, Play,
-  FileText, Pin, Eye, X, MessageSquare, Minus,
+  FileText, Pin, Eye, X, MessageSquare, Minus, Download, CornerDownRight,
 } from 'lucide-react'
 
 function deriveTaskTitle(requirement: string, fallback = '未命名任务') {
@@ -54,6 +56,12 @@ function localDateStr(d = new Date()) {
   const m = String(d.getMonth() + 1).padStart(2, '0')
   const day = String(d.getDate()).padStart(2, '0')
   return `${y}-${m}-${day}`
+}
+
+function shiftDateStr(iso: string, deltaDays: number) {
+  const d = new Date(`${iso}T12:00:00`)
+  d.setDate(d.getDate() + deltaDays)
+  return localDateStr(d)
 }
 
 function planStatusIcon(status: string) {
@@ -139,6 +147,12 @@ export function SchedulePage() {
   const [adding, setAdding] = useState(false)
   const [startingWf, setStartingWf] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [continuing, setContinuing] = useState(false)
+  const [carryCandidates, setCarryCandidates] = useState<ApiDailyTaskSummary[]>([])
+  const [carrySelectedIds, setCarrySelectedIds] = useState<string[]>([])
+  const [showCarryPicker, setShowCarryPicker] = useState(false)
+  const [carryPreview, setCarryPreview] = useState<ApiDailyTask | null>(null)
+  const [carryPreviewLoading, setCarryPreviewLoading] = useState(false)
   const [noteFormKey, setNoteFormKey] = useState(0)
   const [noteError, setNoteError] = useState<string | null>(null)
   const noteFormRef = useRef<HTMLFormElement>(null)
@@ -389,6 +403,38 @@ export function SchedulePage() {
   }, [planDate]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
+    if (planDate !== today) {
+      setCarryCandidates([])
+      setCarrySelectedIds([])
+      setShowCarryPicker(false)
+      return
+    }
+    let cancelled = false
+    const days = Array.from({ length: 14 }, (_, i) => shiftDateStr(today, -(i + 1)))
+    Promise.all(days.map(d => listDailyTasks(d).then(r => r.items).catch(() => [] as ApiDailyTaskSummary[])))
+      .then(lists => {
+        if (cancelled) return
+        const items = lists
+          .flat()
+          .filter(t => t.status !== 'done' && !t.continued_to_id)
+          .sort((a, b) => (a.plan_date < b.plan_date ? 1 : a.plan_date > b.plan_date ? -1 : 0))
+        setCarryCandidates(items)
+        setCarrySelectedIds(items.map(t => t.id))
+        if (items.length === 0) setShowCarryPicker(false)
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCarryCandidates([])
+          setCarrySelectedIds([])
+          setShowCarryPicker(false)
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [planDate, today, tasks])
+
+  useEffect(() => {
     listWorkflowDefinitions()
       .then(res => {
         setWorkflows(res.items)
@@ -637,6 +683,77 @@ export function SchedulePage() {
     }
   }
 
+  async function handleContinueTask(taskId: string, jump = true) {
+    if (continuing) return
+    setContinuing(true)
+    setError(null)
+    try {
+      const created = await continueDailyTask(taskId, today)
+      if (jump) {
+        setPlanDate(today)
+        await loadTasks(created.id, today)
+        await loadDetail(created.id)
+      } else {
+        await loadTasks(selectedId)
+        if (selectedId === taskId) await loadDetail(taskId)
+      }
+      return created
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '续作失败')
+      return null
+    } finally {
+      setContinuing(false)
+    }
+  }
+
+  async function handleContinueAllCandidates() {
+    const ids = carrySelectedIds.filter(id => carryCandidates.some(t => t.id === id))
+    if (!ids.length || continuing) return
+    setContinuing(true)
+    setError(null)
+    try {
+      let lastId: string | null = null
+      for (const id of ids) {
+        const created = await continueDailyTask(id, today)
+        lastId = created.id
+      }
+      setPlanDate(today)
+      await loadTasks(lastId, today)
+      if (lastId) await loadDetail(lastId)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '批量续作失败')
+      await loadTasks(null, today)
+    } finally {
+      setContinuing(false)
+    }
+  }
+
+  function toggleCarrySelected(taskId: string) {
+    setCarrySelectedIds(prev =>
+      prev.includes(taskId) ? prev.filter(id => id !== taskId) : [...prev, taskId],
+    )
+  }
+
+  async function openCarryPreview(taskId: string) {
+    setCarryPreviewLoading(true)
+    setError(null)
+    try {
+      const task = await getDailyTask(taskId)
+      setCarryPreview(task)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '加载任务详情失败')
+    } finally {
+      setCarryPreviewLoading(false)
+    }
+  }
+
+  async function handleContinueFromPreview() {
+    if (!carryPreview || continuing) return
+    const sourceId = carryPreview.id
+    setCarryPreview(null)
+    await handleContinueTask(sourceId, true)
+  }
+
   async function handleSaveRequirement() {
     if (!selectedId || savingMeta) return
     const title = editTitle.trim()
@@ -786,6 +903,15 @@ export function SchedulePage() {
     }
   }
 
+  async function handleDownloadNote(noteId: string) {
+    if (!selectedId) return
+    try {
+      await downloadTaskNote(selectedId, noteId)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '下载失败')
+    }
+  }
+
   async function handleAddMemory() {
     if (!selectedId || !memoryContent.trim() || savingSide) return
     setSavingSide(true)
@@ -843,6 +969,11 @@ export function SchedulePage() {
         }]
       : [])
   const isToday = planDate === today
+  const canContinueSelected =
+    !!detail &&
+    detail.plan_date < today &&
+    detail.status !== 'done' &&
+    !detail.continued_to_id
   const stepRate =
     overview && overview.plan_item_count > 0
       ? Math.round((overview.plan_done_count / overview.plan_item_count) * 100)
@@ -925,6 +1056,89 @@ export function SchedulePage() {
               </div>
             </div>
           )}
+          {isToday && carryCandidates.length > 0 && (
+            <div className="space-y-2">
+              <button
+                type="button"
+                className={`w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg border text-xs transition-colors ${
+                  showCarryPicker
+                    ? 'border-accent/30 bg-accent/5 text-text-strong'
+                    : 'border-border-subtle bg-surface-2/60 text-text-muted hover:border-border hover:text-text-strong'
+                }`}
+                onClick={() => setShowCarryPicker(v => !v)}
+              >
+                <span className="inline-flex items-center gap-1.5">
+                  <CornerDownRight className="w-3.5 h-3.5 shrink-0" />
+                  {showCarryPicker ? '收起往日续作' : '从往日任务续作'}
+                </span>
+                <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-surface-1 border border-border-subtle">
+                  {carryCandidates.length}
+                </span>
+              </button>
+              {showCarryPicker && (
+                <div className="rounded-lg border border-border-subtle bg-surface-2/50 p-3 space-y-2">
+                  <div className="text-[11px] text-text-muted">
+                    近 14 天未完成 · 点击标题查看详情，勾选后批量续作
+                  </div>
+                  <div className="max-h-40 overflow-y-auto space-y-1">
+                    {carryCandidates.map(t => {
+                      const checked = carrySelectedIds.includes(t.id)
+                      return (
+                        <div
+                          key={t.id}
+                          className="flex items-start gap-2 text-[11px] text-text-muted rounded px-1 py-0.5 hover:bg-surface-1"
+                        >
+                          <input
+                            type="checkbox"
+                            className="mt-0.5"
+                            checked={checked}
+                            onChange={() => toggleCarrySelected(t.id)}
+                          />
+                          <button
+                            type="button"
+                            className="min-w-0 flex-1 text-left hover:text-accent"
+                            onClick={() => void openCarryPreview(t.id)}
+                          >
+                            <span className="font-mono text-text-muted">{t.plan_date}</span>
+                            <span className="mx-1">·</span>
+                            <span className="text-text-strong">{t.title}</span>
+                            <span className="ml-1 text-text-muted">
+                              ({t.plan_done_count}/{t.plan_item_count})
+                            </span>
+                          </button>
+                        </div>
+                      )
+                    })}
+                  </div>
+                  <div className="flex flex-wrap gap-2 items-center">
+                    <button
+                      type="button"
+                      className="text-[11px] text-text-muted hover:text-text-strong"
+                      onClick={() => setCarrySelectedIds(carryCandidates.map(t => t.id))}
+                    >
+                      全选
+                    </button>
+                    <button
+                      type="button"
+                      className="text-[11px] text-text-muted hover:text-text-strong"
+                      onClick={() => setCarrySelectedIds([])}
+                    >
+                      清空
+                    </button>
+                    <button
+                      type="button"
+                      disabled={continuing || carrySelectedIds.length === 0}
+                      className="ml-auto inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] border border-dashed border-border-subtle text-text-muted hover:border-accent/50 hover:text-accent disabled:opacity-40"
+                      onClick={() => void handleContinueAllCandidates()}
+                    >
+                      <CornerDownRight className="w-3 h-3" />
+                      {continuing ? '续作中…' : `续作所选 ${carrySelectedIds.length}`}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="flex-1 overflow-y-auto p-3 space-y-2">
@@ -932,17 +1146,23 @@ export function SchedulePage() {
           {!loading && tasks.length === 0 && (
             <div className="p-4 text-sm text-text-muted text-center">该日暂无任务</div>
           )}
-          {tasks.map(task => (
-            <button
+          {tasks.map(task => {
+            const canContinueHere =
+              planDate < today && task.status !== 'done' && !task.continued_to_id
+            return (
+            <div
               key={task.id}
-              type="button"
-              onClick={() => setSelectedId(task.id)}
               className={`w-full text-left p-4 rounded-xl border transition-all ${
                 selectedId === task.id
                   ? 'border-accent/40 bg-accent/5 shadow-sm'
                   : 'border-transparent hover:bg-surface-2'
               }`}
             >
+              <button
+                type="button"
+                onClick={() => setSelectedId(task.id)}
+                className="w-full text-left"
+              >
               <div className="flex items-start gap-3">
                 {task.type === 'dev' ? (
                   <Code2 className="w-4 h-4 text-accent shrink-0 mt-0.5" />
@@ -956,14 +1176,34 @@ export function SchedulePage() {
                       {(statusBadge[task.status as keyof typeof statusBadge] ?? statusBadge.todo).label}
                     </Badge>
                     {task.workflow_title && <Badge variant="info">{task.workflow_title}</Badge>}
+                    {task.continued_from_id && <Badge variant="default">续作</Badge>}
+                    {task.continued_to_id && <Badge variant="default">已续走</Badge>}
                   </div>
                   <div className="mt-2 text-[11px] text-text-muted">
                     {task.plan_done_count}/{task.plan_item_count} 步骤
                   </div>
                 </div>
               </div>
-            </button>
-          ))}
+              </button>
+              {canContinueHere && (
+                <div className="mt-2 flex justify-end">
+                  <button
+                    type="button"
+                    disabled={continuing || carryPreviewLoading}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] border border-dashed border-border-subtle text-text-muted hover:border-accent/50 hover:text-accent disabled:opacity-40"
+                    onClick={e => {
+                      e.stopPropagation()
+                      void openCarryPreview(task.id)
+                    }}
+                  >
+                    <CornerDownRight className="w-3 h-3" />
+                    查看并续作
+                  </button>
+                </div>
+              )}
+            </div>
+            )
+          })}
         </div>
 
         <div className="p-4 border-t border-border-subtle">
@@ -1055,6 +1295,17 @@ export function SchedulePage() {
               description={detail?.summary || selectedSummary.summary || '暂无系统摘要'}
               action={
                 <div className="flex gap-2 flex-wrap">
+                  {canContinueSelected && (
+                    <button
+                      type="button"
+                      disabled={continuing || carryPreviewLoading}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs border border-dashed border-border-subtle text-text-muted hover:border-accent/50 hover:text-accent disabled:opacity-40"
+                      onClick={() => void openCarryPreview(detail.id)}
+                    >
+                      <CornerDownRight className="w-3.5 h-3.5" />
+                      查看并续作
+                    </button>
+                  )}
                   <Btn
                     variant="secondary"
                     size="sm"
@@ -1092,6 +1343,48 @@ export function SchedulePage() {
 
             <div className="mb-6 p-4 rounded-xl bg-surface-1 border border-border-subtle space-y-3">
               <div className="text-sm font-medium text-text-strong">任务要求</div>
+              {(detail?.continued_from_id || detail?.continued_to_id) && (
+                <div className="flex flex-wrap gap-2 text-xs text-text-muted">
+                  {detail.continued_from_id && (
+                    <button
+                      type="button"
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-border-subtle bg-surface-2 hover:border-accent/40 hover:text-accent"
+                      onClick={() => {
+                        const id = detail.continued_from_id!
+                        const day = detail.continued_from_plan_date
+                        if (day) {
+                          setPlanDate(day)
+                          void loadTasks(id, day).then(() => loadDetail(id))
+                        } else {
+                          setSelectedId(id)
+                        }
+                      }}
+                    >
+                      续自 {detail.continued_from_plan_date || '—'}
+                      {detail.continued_from_title ? ` · ${detail.continued_from_title}` : ''}
+                    </button>
+                  )}
+                  {detail.continued_to_id && (
+                    <button
+                      type="button"
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-border-subtle bg-surface-2 hover:border-accent/40 hover:text-accent"
+                      onClick={() => {
+                        const id = detail.continued_to_id!
+                        const day = detail.continued_to_plan_date
+                        if (day) {
+                          setPlanDate(day)
+                          void loadTasks(id, day).then(() => loadDetail(id))
+                        } else {
+                          setSelectedId(id)
+                        }
+                      }}
+                    >
+                      已续至 {detail.continued_to_plan_date || '—'}
+                      {detail.continued_to_title ? ` · ${detail.continued_to_title}` : ''}
+                    </button>
+                  )}
+                </div>
+              )}
               <p className="text-xs text-text-muted -mt-1">
                 可在此查看与修改任务要求；启动工作流时优先使用此处内容。
               </p>
@@ -1126,7 +1419,7 @@ export function SchedulePage() {
                   <FileText className="w-4 h-4 text-accent" />
                   笔记与文档
                 </div>
-                <p className="text-xs text-text-muted -mt-1">支持 Markdown 笔记、上传文本文件（选完即保存），或登记本地文件路径；点击可预览。启动工作流时会带入 prompt。</p>
+                  <p className="text-xs text-text-muted -mt-1">支持 Markdown 笔记、上传文本文件（选完即保存），或登记本地文件路径；点击可预览，可下载。启动工作流时会带入 prompt。</p>
                 <div className="space-y-2 max-h-56 overflow-y-auto">
                   {(detail?.notes ?? []).length === 0 && (
                     <div className="text-xs text-text-muted">暂无笔记</div>
@@ -1148,9 +1441,19 @@ export function SchedulePage() {
                           </div>
                           <Badge variant="default">{note.kind === 'file' ? '文件' : 'Markdown'}</Badge>
                         </button>
-                        <button type="button" className="text-text-muted hover:text-danger" onClick={() => handleDeleteNote(note.id)}>
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            className="text-text-muted hover:text-accent p-0.5"
+                            title="下载"
+                            onClick={() => void handleDownloadNote(note.id)}
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                          </button>
+                          <button type="button" className="text-text-muted hover:text-danger p-0.5" title="删除" onClick={() => handleDeleteNote(note.id)}>
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       </div>
                       {note.file_path && (
                         <div className="text-xs font-mono text-text-muted break-all">{note.file_path}</div>
@@ -1461,6 +1764,137 @@ export function SchedulePage() {
         </div>
       )}
 
+      {(carryPreview || carryPreviewLoading) && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => {
+            if (!carryPreviewLoading) setCarryPreview(null)
+          }}
+        >
+          <div
+            className="w-full max-w-2xl max-h-[85vh] overflow-hidden rounded-xl bg-surface-1 border border-border-subtle shadow-xl flex flex-col"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-border-subtle">
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-text-strong truncate">
+                  {carryPreviewLoading ? '加载任务详情…' : (carryPreview?.title || '任务详情')}
+                </div>
+                {carryPreview && (
+                  <div className="flex items-center gap-2 mt-1 flex-wrap text-xs text-text-muted">
+                    <span className="font-mono">{carryPreview.plan_date}</span>
+                    <Badge variant={(statusBadge[carryPreview.status as keyof typeof statusBadge] ?? statusBadge.todo).variant}>
+                      {(statusBadge[carryPreview.status as keyof typeof statusBadge] ?? statusBadge.todo).label}
+                    </Badge>
+                    {carryPreview.workflow_title && (
+                      <Badge variant="info">{carryPreview.workflow_title}</Badge>
+                    )}
+                  </div>
+                )}
+              </div>
+              <button
+                type="button"
+                className="text-text-muted hover:text-text-strong"
+                disabled={carryPreviewLoading}
+                onClick={() => setCarryPreview(null)}
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="px-5 py-4 overflow-y-auto space-y-4 text-sm">
+              {carryPreviewLoading && (
+                <div className="text-text-muted py-8 text-center">加载中…</div>
+              )}
+              {carryPreview && (
+                <>
+                  <div>
+                    <div className="text-xs text-text-muted mb-1">任务要求</div>
+                    <div className="whitespace-pre-wrap text-text leading-relaxed rounded-lg bg-surface-2 border border-border-subtle p-3 text-xs max-h-40 overflow-y-auto">
+                      {(carryPreview.requirement || '').trim() || '（无详细需求）'}
+                    </div>
+                  </div>
+                  {carryPreview.summary?.trim() && (
+                    <div>
+                      <div className="text-xs text-text-muted mb-1">摘要</div>
+                      <p className="text-xs text-text-muted whitespace-pre-wrap">{carryPreview.summary}</p>
+                    </div>
+                  )}
+                  <div>
+                    <div className="text-xs text-text-muted mb-1">
+                      计划步骤 · {carryPreview.plan_items.filter(p => p.status === 'done').length}/{carryPreview.plan_items.length} 完成
+                    </div>
+                    {carryPreview.plan_items.length === 0 ? (
+                      <div className="text-xs text-text-muted">暂无步骤</div>
+                    ) : (
+                      <ul className="space-y-1 max-h-36 overflow-y-auto">
+                        {carryPreview.plan_items.map(item => (
+                          <li key={item.id} className="flex items-start gap-2 text-xs">
+                            {planStatusIcon(item.status)}
+                            <span className="text-text-strong min-w-0 truncate">{item.title}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                  <div>
+                    <div className="text-xs text-text-muted mb-1">
+                      笔记与文档 · {carryPreview.notes?.length ?? 0}
+                    </div>
+                    {(carryPreview.notes?.length ?? 0) === 0 ? (
+                      <div className="text-xs text-text-muted">暂无笔记</div>
+                    ) : (
+                      <ul className="space-y-1.5 max-h-28 overflow-y-auto">
+                        {carryPreview.notes.map(n => (
+                          <li key={n.id} className="text-xs rounded-md bg-surface-2 border border-border-subtle px-2.5 py-1.5">
+                            <div className="font-medium text-text-strong truncate">
+                              {n.title || (n.kind === 'file' ? '文件' : '笔记')}
+                            </div>
+                            {n.body?.trim() && (
+                              <p className="text-text-muted line-clamp-2 mt-0.5 whitespace-pre-wrap">{n.body}</p>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                  {(carryPreview.memories?.length ?? 0) > 0 && (
+                    <div>
+                      <div className="text-xs text-text-muted mb-1">
+                        Agent 记忆 · {carryPreview.memories.length}
+                      </div>
+                      <ul className="space-y-1 max-h-24 overflow-y-auto">
+                        {carryPreview.memories.map(m => (
+                          <li key={m.id} className="text-xs text-text-muted line-clamp-2">
+                            {m.pinned ? '📌 ' : ''}{m.content}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+            <div className="px-5 py-3 border-t border-border-subtle flex justify-end gap-2">
+              <Btn variant="secondary" size="sm" type="button" onClick={() => setCarryPreview(null)}>
+                关闭
+              </Btn>
+              {carryPreview && carryPreview.plan_date < today && carryPreview.status !== 'done' && !carryPreview.continued_to_id && (
+                <Btn
+                  variant="primary"
+                  size="sm"
+                  type="button"
+                  disabled={continuing}
+                  onClick={() => void handleContinueFromPreview()}
+                >
+                  <CornerDownRight className="w-3.5 h-3.5" />
+                  {continuing ? '续作中…' : '确认续到今天'}
+                </Btn>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {previewNote && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setPreviewNote(null)}>
           <div
@@ -1480,6 +1914,15 @@ export function SchedulePage() {
                 </div>
               </div>
               <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg border border-border-subtle bg-surface-2 text-text-muted hover:text-accent hover:border-accent/40"
+                  title="下载"
+                  onClick={() => void handleDownloadNote(previewNote.id)}
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  下载
+                </button>
                 <div className="flex rounded-lg border border-border-subtle overflow-hidden">
                   <button
                     type="button"

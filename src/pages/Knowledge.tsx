@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   chatKnowledgeBase,
   createKnowledgeBase,
   createKnowledgeDocument,
+  createKnowledgeDocumentsFromNotes,
   deleteKnowledgeBase,
   deleteKnowledgeDocument,
   getKnowledgeDocument,
@@ -14,6 +15,7 @@ import {
   type ApiKnowledgeDocumentDetail,
   type ApiKnowledgeSearchHit,
 } from '../api/knowledge'
+import { listScheduleNotes, type ApiTaskNoteListItem } from '../api/schedule'
 import { Badge, Btn } from '../components/ui'
 import {
   BookOpen,
@@ -30,6 +32,7 @@ import {
 } from 'lucide-react'
 
 type SidePage = 'bases' | 'files' | null
+type DocSource = 'paste' | 'notes'
 
 type ChatMsg = {
   id: string
@@ -61,10 +64,52 @@ export function KnowledgePage() {
   const [baseBusy, setBaseBusy] = useState(false)
 
   const [showDocForm, setShowDocForm] = useState(false)
+  const [docSource, setDocSource] = useState<DocSource>('paste')
   const [docName, setDocName] = useState('')
   const [docContent, setDocContent] = useState('')
   const [docMaxChars, setDocMaxChars] = useState(800)
   const [docBusy, setDocBusy] = useState(false)
+  const [scheduleNotes, setScheduleNotes] = useState<ApiTaskNoteListItem[]>([])
+  const [notesLoading, setNotesLoading] = useState(false)
+  const [selectedNoteIds, setSelectedNoteIds] = useState<string[]>([])
+  const [pickerTaskId, setPickerTaskId] = useState<string | null>(null)
+
+  const scheduleTasks = useMemo(() => {
+    const map = new Map<
+      string,
+      { id: string; title: string; plan_date: string; noteCount: number; contentCount: number }
+    >()
+    for (const n of scheduleNotes) {
+      const cur = map.get(n.daily_task_id)
+      if (cur) {
+        cur.noteCount += 1
+        if (n.has_content) cur.contentCount += 1
+      } else {
+        map.set(n.daily_task_id, {
+          id: n.daily_task_id,
+          title: n.task_title,
+          plan_date: n.plan_date,
+          noteCount: 1,
+          contentCount: n.has_content ? 1 : 0,
+        })
+      }
+    }
+    return Array.from(map.values()).sort((a, b) =>
+      a.plan_date === b.plan_date
+        ? a.title.localeCompare(b.title)
+        : b.plan_date.localeCompare(a.plan_date),
+    )
+  }, [scheduleNotes])
+
+  const notesOfPickerTask = useMemo(
+    () =>
+      pickerTaskId
+        ? scheduleNotes.filter(n => n.daily_task_id === pickerTaskId)
+        : [],
+    [scheduleNotes, pickerTaskId],
+  )
+
+  const pickerTask = scheduleTasks.find(t => t.id === pickerTaskId) ?? null
 
   const [preview, setPreview] = useState<ApiKnowledgeDocumentDetail | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
@@ -152,21 +197,82 @@ export function KnowledgePage() {
     }
   }
 
+  async function openDocForm() {
+    setShowDocForm(true)
+    setDocSource('paste')
+    setDocName('')
+    setDocContent('')
+    setDocMaxChars(800)
+    setSelectedNoteIds([])
+    setPickerTaskId(null)
+    setNotesLoading(true)
+    try {
+      const res = await listScheduleNotes({ days: 14 })
+      setScheduleNotes(res.items)
+    } catch {
+      setScheduleNotes([])
+    } finally {
+      setNotesLoading(false)
+    }
+  }
+
+  async function refreshScheduleNotes() {
+    setNotesLoading(true)
+    try {
+      const res = await listScheduleNotes({ days: 14 })
+      setScheduleNotes(res.items)
+      if (pickerTaskId && !res.items.some(n => n.daily_task_id === pickerTaskId)) {
+        setPickerTaskId(null)
+      }
+    } catch {
+      setScheduleNotes([])
+    } finally {
+      setNotesLoading(false)
+    }
+  }
+
+  function toggleNote(id: string) {
+    setSelectedNoteIds(prev =>
+      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id],
+    )
+  }
+
   async function handleCreateDoc(e: React.FormEvent) {
     e.preventDefault()
-    if (!selectedId || !docName.trim() || !docContent.trim() || docBusy) return
+    if (!selectedId || docBusy) return
     setDocBusy(true)
+    setError(null)
     try {
-      await createKnowledgeDocument(selectedId, {
-        name: docName.trim(),
-        content: docContent,
-        segment_max_chars: docMaxChars,
-      })
-      setShowDocForm(false)
-      setDocName('')
-      setDocContent('')
-      await loadBases(selectedId)
-      await loadDocs(selectedId)
+      if (docSource === 'notes') {
+        if (selectedNoteIds.length === 0) {
+          setError('请至少选择一条计划笔记/文档')
+          return
+        }
+        const res = await createKnowledgeDocumentsFromNotes(selectedId, {
+          note_ids: selectedNoteIds,
+          segment_max_chars: docMaxChars,
+        })
+        setShowDocForm(false)
+        setSelectedNoteIds([])
+        await loadBases(selectedId)
+        await loadDocs(selectedId)
+        if (res.items[0]) setPreview(null)
+      } else {
+        if (!docName.trim() || !docContent.trim()) {
+          setError('请填写文档名与正文')
+          return
+        }
+        await createKnowledgeDocument(selectedId, {
+          name: docName.trim(),
+          content: docContent,
+          segment_max_chars: docMaxChars,
+        })
+        setShowDocForm(false)
+        setDocName('')
+        setDocContent('')
+        await loadBases(selectedId)
+        await loadDocs(selectedId)
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : '入库失败')
     } finally {
@@ -518,7 +624,7 @@ export function KnowledgePage() {
                   <span className="truncate" title={selected.name}>{selected.name}</span>
                 </div>
                 <div className="flex gap-2">
-                  <Btn variant="primary" size="sm" onClick={() => setShowDocForm(true)}>
+                  <Btn variant="primary" size="sm" onClick={() => void openDocForm()}>
                     <Plus className="w-3.5 h-3.5" />添加文件
                   </Btn>
                   <Btn variant="secondary" size="sm" onClick={handleReindex} disabled={reindexing}>
@@ -619,21 +725,155 @@ export function KnowledgePage() {
               <h2 className="text-base font-medium text-text-strong">添加文件 — {selected.name}</h2>
               <button type="button" onClick={() => setShowDocForm(false)} className="p-1 text-text-muted"><X className="w-4 h-4" /></button>
             </div>
-            <label className="block text-xs text-text-muted">
-              文件名
-              <input required value={docName} onChange={e => setDocName(e.target.value)} placeholder="notes.md" className="mt-1 w-full px-3 py-2 rounded-md bg-surface-2 border border-border text-sm" />
-            </label>
-            <label className="block text-xs text-text-muted">
-              正文
-              <textarea required value={docContent} onChange={e => setDocContent(e.target.value)} rows={12} className="mt-1 w-full px-3 py-2 rounded-md bg-surface-2 border border-border text-sm font-mono" />
-            </label>
+
+            <div className="flex rounded-lg border border-border-subtle p-0.5 text-xs w-fit">
+              <button
+                type="button"
+                onClick={() => setDocSource('paste')}
+                className={`px-3 py-1.5 rounded-md ${docSource === 'paste' ? 'bg-surface-3 text-text-strong' : 'text-text-muted'}`}
+              >
+                粘贴文本
+              </button>
+              <button
+                type="button"
+                onClick={() => setDocSource('notes')}
+                className={`px-3 py-1.5 rounded-md ${docSource === 'notes' ? 'bg-surface-3 text-text-strong' : 'text-text-muted'}`}
+              >
+                从计划笔记选择
+              </button>
+            </div>
+
+            {docSource === 'paste' ? (
+              <>
+                <label className="block text-xs text-text-muted">
+                  文件名
+                  <input required={docSource === 'paste'} value={docName} onChange={e => setDocName(e.target.value)} placeholder="notes.md" className="mt-1 w-full px-3 py-2 rounded-md bg-surface-2 border border-border text-sm" />
+                </label>
+                <label className="block text-xs text-text-muted">
+                  正文
+                  <textarea required={docSource === 'paste'} value={docContent} onChange={e => setDocContent(e.target.value)} rows={10} className="mt-1 w-full px-3 py-2 rounded-md bg-surface-2 border border-border text-sm font-mono" />
+                </label>
+              </>
+            ) : (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between text-xs text-text-muted">
+                  <span>近 14 天 · 先选计划，再选其中的笔记/文档</span>
+                  <button
+                    type="button"
+                    className="text-accent hover:underline"
+                    onClick={() => void refreshScheduleNotes()}
+                  >
+                    刷新
+                  </button>
+                </div>
+                {notesLoading && <div className="text-sm text-text-muted py-6 text-center">加载中…</div>}
+                {!notesLoading && scheduleTasks.length === 0 && (
+                  <div className="text-sm text-text-muted py-6 text-center">
+                    暂无带笔记的计划。请先在「今日计划」任务里添加笔记与文档。
+                  </div>
+                )}
+
+                {!notesLoading && scheduleTasks.length > 0 && !pickerTaskId && (
+                  <div className="max-h-72 overflow-y-auto space-y-2 border border-border-subtle rounded-lg p-2">
+                    {scheduleTasks.map(t => (
+                      <button
+                        key={t.id}
+                        type="button"
+                        onClick={() => setPickerTaskId(t.id)}
+                        className="w-full text-left p-3 rounded-lg border border-transparent hover:bg-surface-2 hover:border-border-subtle"
+                      >
+                        <div className="text-sm font-medium text-text-strong truncate">{t.title}</div>
+                        <div className="text-[11px] text-text-muted mt-1">
+                          {t.plan_date} · {t.contentCount}/{t.noteCount} 个可导入文件
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {!notesLoading && pickerTaskId && pickerTask && (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2 text-xs">
+                      <button
+                        type="button"
+                        className="text-accent hover:underline shrink-0"
+                        onClick={() => setPickerTaskId(null)}
+                      >
+                        ← 返回计划列表
+                      </button>
+                      <span className="text-text-muted truncate">
+                        {pickerTask.plan_date} · {pickerTask.title}
+                      </span>
+                    </div>
+                    <div className="max-h-64 overflow-y-auto space-y-2 border border-border-subtle rounded-lg p-2">
+                      {notesOfPickerTask.length === 0 && (
+                        <div className="text-sm text-text-muted py-6 text-center">该计划下暂无笔记</div>
+                      )}
+                      {notesOfPickerTask.map(n => {
+                        const checked = selectedNoteIds.includes(n.id)
+                        return (
+                          <label
+                            key={n.id}
+                            className={`flex gap-2 p-2.5 rounded-lg border cursor-pointer ${
+                              checked ? 'border-accent/40 bg-accent/5' : 'border-transparent hover:bg-surface-2'
+                            } ${!n.has_content ? 'opacity-50 cursor-not-allowed' : ''}`}
+                          >
+                            <input
+                              type="checkbox"
+                              className="mt-1"
+                              checked={checked}
+                              disabled={!n.has_content}
+                              onChange={() => toggleNote(n.id)}
+                            />
+                            <div className="min-w-0 flex-1">
+                              <div className="text-sm text-text-strong truncate">{n.title}</div>
+                              <div className="text-[11px] text-text-muted mt-0.5 truncate">
+                                {n.kind}
+                                {n.file_path ? ` · ${n.file_path}` : ''}
+                                {!n.has_content ? ' · 无内容' : ''}
+                              </div>
+                              {n.body_preview && (
+                                <div className="text-xs text-text-muted mt-1 line-clamp-2">{n.body_preview}</div>
+                              )}
+                            </div>
+                          </label>
+                        )
+                      })}
+                    </div>
+                    <div className="flex items-center justify-between text-[11px] text-text-muted">
+                      <span>已选 {selectedNoteIds.length} 条（可跨计划累计）</span>
+                      {selectedNoteIds.length > 0 && (
+                        <button
+                          type="button"
+                          className="text-accent hover:underline"
+                          onClick={() => setSelectedNoteIds([])}
+                        >
+                          清空选择
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
             <label className="block text-xs text-text-muted">
               分块最大字符
               <input type="number" min={100} max={8000} value={docMaxChars} onChange={e => setDocMaxChars(Number(e.target.value) || 800)} className="mt-1 w-full px-3 py-2 rounded-md bg-surface-2 border border-border text-sm" />
             </label>
             <div className="flex justify-end gap-2">
               <Btn variant="secondary" size="sm" type="button" onClick={() => setShowDocForm(false)}>取消</Btn>
-              <Btn variant="primary" size="sm" type="submit" disabled={docBusy}>{docBusy ? '入库中…' : '保存并索引'}</Btn>
+              <Btn
+                variant="primary"
+                size="sm"
+                type="submit"
+                disabled={
+                  docBusy ||
+                  (docSource === 'notes' ? selectedNoteIds.length === 0 : !docName.trim() || !docContent.trim())
+                }
+              >
+                {docBusy ? '入库中…' : docSource === 'notes' ? `导入并索引（${selectedNoteIds.length}）` : '保存并索引'}
+              </Btn>
             </div>
           </form>
         </div>

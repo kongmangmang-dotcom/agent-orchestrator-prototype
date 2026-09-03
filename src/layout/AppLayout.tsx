@@ -11,6 +11,7 @@ import {
   UsersRound,
   BookOpen,
 } from 'lucide-react'
+import { AppToastHost } from '../components/AppToastHost'
 
 const nav = [
   { to: '/', icon: LayoutDashboard, label: '概览' },
@@ -72,6 +73,7 @@ export function AppLayout() {
           </div>
         )}
       </main>
+      <AppToastHost />
     </div>
   )
 }

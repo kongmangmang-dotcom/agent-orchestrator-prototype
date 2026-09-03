@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { getWorkflowRun, listWorkflowRuns, previewTerminateWorkflowRun, terminateWorkflowRun } from '../api/workflows'
+import { getWorkflowRun, listWorkflowRuns, previewTerminateWorkflowRun, terminateWorkflowRun, continueWorkflowRun } from '../api/workflows'
 import type { ApiWorkflowRun, ApiWorkflowRunSummary, ApiWorkflowStepRun } from '../api/types'
 import { LiveRunPanel } from '../components/LiveRunPanel'
 import { PageHeader, Btn, SectionTitle, StatusDot, Badge } from '../components/ui'
-import { RefreshCw, GitBranch, ArrowRight, Trash2 } from 'lucide-react'
+import { RefreshCw, GitBranch, ArrowRight, Trash2, CornerDownRight } from 'lucide-react'
+import { ingestWorkflowNotifications } from '../lib/appToast'
 
 function statusDot(status: string): 'running' | 'connected' | 'error' | 'idle' | 'paused' {
   if (status === 'running' || status === 'pending') return 'running'
+  if (status === 'waiting_approval') return 'paused'
   if (status === 'completed') return 'connected'
   if (status === 'failed' || status === 'cancelled') return 'error'
   return 'idle'
@@ -16,6 +18,7 @@ function statusDot(status: string): 'running' | 'connected' | 'error' | 'idle' |
 function statusBadgeVariant(status: string): 'success' | 'accent' | 'danger' | 'default' | 'info' {
   if (status === 'completed') return 'success'
   if (status === 'running') return 'accent'
+  if (status === 'waiting_approval') return 'info'
   if (status === 'failed' || status === 'cancelled') return 'danger'
   if (status === 'pending') return 'info'
   return 'default'
@@ -42,6 +45,7 @@ export function RunMonitorPage() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [terminating, setTerminating] = useState(false)
+  const [continuing, setContinuing] = useState(false)
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [confirmNotes, setConfirmNotes] = useState<{ id: string; title: string; file_path: string }[]>([])
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -96,6 +100,28 @@ export function RunMonitorPage() {
     detail?.status === 'completed' ||
     detail?.status === 'failed' ||
     detail?.status === 'cancelled'
+  const runWaiting = detail?.status === 'waiting_approval'
+
+  useEffect(() => {
+    if (!detail) return
+    ingestWorkflowNotifications({
+      runId: detail.id,
+      workflowId: detail.workflow_id,
+      dailyTaskId: detail.daily_task_id,
+      notifications: detail.step_notifications ?? [],
+      onContinue: async runId => {
+        setContinuing(true)
+        try {
+          const run = await continueWorkflowRun(runId)
+          setDetail(run)
+        } catch (e) {
+          setError(e instanceof Error ? e.message : '继续工作流失败')
+        } finally {
+          setContinuing(false)
+        }
+      },
+    })
+  }, [detail?.id, detail?.step_notifications, detail?.status])
 
   useEffect(() => {
     if (!selectedRunId || !detail || runTerminal) {
@@ -184,6 +210,30 @@ export function RunMonitorPage() {
                 <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
                 刷新
               </Btn>
+              {runWaiting && selectedRunId && (
+                <Btn
+                  variant="primary"
+                  size="sm"
+                  type="button"
+                  disabled={continuing}
+                  onClick={() => {
+                    void (async () => {
+                      setContinuing(true)
+                      try {
+                        const run = await continueWorkflowRun(selectedRunId)
+                        setDetail(run)
+                      } catch (e) {
+                        setError(e instanceof Error ? e.message : '继续工作流失败')
+                      } finally {
+                        setContinuing(false)
+                      }
+                    })()
+                  }}
+                >
+                  <CornerDownRight className="w-3.5 h-3.5" />
+                  {continuing ? '继续中…' : '继续下一步'}
+                </Btn>
+              )}
               <Btn
                 variant="danger"
                 size="sm"

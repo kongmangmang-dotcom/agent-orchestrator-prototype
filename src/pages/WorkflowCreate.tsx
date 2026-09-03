@@ -17,15 +17,16 @@ export interface StepFormRow {
   role: string
   depends_on: string[]
   parallel: boolean
+  on_complete: 'none' | 'notify' | 'confirm'
 }
 
 const FEATURE_DEV_PRESET: Omit<StepFormRow, 'agent_id'>[] = [
-  { step_key: 'planning', label: '任务规划', role: 'planner', depends_on: [], parallel: false },
-  { step_key: 'research', label: '项目调研', role: 'researcher', depends_on: ['planning'], parallel: false },
-  { step_key: 'backend', label: '后端实现', role: 'developer', depends_on: ['research'], parallel: false },
-  { step_key: 'frontend', label: '前端实现', role: 'developer', depends_on: ['research'], parallel: true },
-  { step_key: 'testing', label: '测试验证', role: 'tester', depends_on: ['backend', 'frontend'], parallel: false },
-  { step_key: 'review', label: '代码评审', role: 'reviewer', depends_on: ['testing'], parallel: false },
+  { step_key: 'planning', label: '任务规划', role: 'planner', depends_on: [], parallel: false, on_complete: 'none' },
+  { step_key: 'research', label: '项目调研', role: 'researcher', depends_on: ['planning'], parallel: false, on_complete: 'none' },
+  { step_key: 'backend', label: '后端实现', role: 'developer', depends_on: ['research'], parallel: false, on_complete: 'none' },
+  { step_key: 'frontend', label: '前端实现', role: 'developer', depends_on: ['research'], parallel: true, on_complete: 'none' },
+  { step_key: 'testing', label: '测试验证', role: 'tester', depends_on: ['backend', 'frontend'], parallel: false, on_complete: 'none' },
+  { step_key: 'review', label: '代码评审', role: 'reviewer', depends_on: ['testing'], parallel: false, on_complete: 'none' },
 ]
 
 /** 工作流模板预设分类标签 */
@@ -48,6 +49,7 @@ function emptyStep(): StepFormRow {
     role: '',
     depends_on: [],
     parallel: false,
+    on_complete: 'none',
   }
 }
 
@@ -123,6 +125,10 @@ export function WorkflowFormPage() {
                 role: s.role || '',
                 depends_on: s.depends_on,
                 parallel: s.parallel,
+                on_complete:
+                  s.on_complete === 'notify' || s.on_complete === 'confirm'
+                    ? s.on_complete
+                    : 'none',
               }))
             : [emptyStep()],
         )
@@ -274,6 +280,7 @@ export function WorkflowFormPage() {
         role: (row.role || '').trim(),
         depends_on: row.depends_on,
         parallel: row.parallel,
+        on_complete: row.on_complete || 'none',
         sort_order: index,
       }))
       const validation = validateWorkflowSteps(normalized)
@@ -562,6 +569,22 @@ export function WorkflowFormPage() {
                   <span className="text-[10px] text-text-muted mt-1 block">Ctrl/⌘ 多选</span>
                 </label>
                 <div className="lg:col-span-2 flex flex-col gap-2 pt-5">
+                  <label className="block text-xs text-text-muted -mt-5 mb-1">
+                    完成后
+                    <select
+                      value={row.on_complete}
+                      onChange={e =>
+                        updateStep(index, {
+                          on_complete: e.target.value as StepFormRow['on_complete'],
+                        })
+                      }
+                      className="mt-1 w-full px-3 py-2 rounded-md bg-surface-2 border border-border text-sm"
+                    >
+                      <option value="none">不打断（自动下一步）</option>
+                      <option value="notify">完成提醒（不停）</option>
+                      <option value="confirm">需要确认（暂停）</option>
+                    </select>
+                  </label>
                   <label className="flex items-center gap-2 text-xs text-text cursor-pointer">
                     <input
                       type="checkbox"

@@ -149,6 +149,19 @@ export function createKnowledgeDocument(
   })
 }
 
+export function createKnowledgeDocumentsFromNotes(
+  knowledgeId: string,
+  body: { note_ids: string[]; segment_max_chars?: number },
+) {
+  return apiFetch<ListResponse<ApiKnowledgeDocument>>(
+    `/knowledge/bases/${knowledgeId}/documents/from-notes`,
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+    },
+  )
+}
+
 export function getKnowledgeDocument(documentId: string) {
   return apiFetch<ApiKnowledgeDocumentDetail>(`/knowledge/documents/${documentId}`)
 }

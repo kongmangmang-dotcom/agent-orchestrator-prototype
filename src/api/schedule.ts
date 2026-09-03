@@ -1,4 +1,4 @@
-import { apiFetch } from './client'
+import { API_BASE, apiFetch } from './client'
 import type { ApiRun } from './runs'
 import type { ApiWorkflowRun, ListResponse } from './types'
 
@@ -38,6 +38,20 @@ export interface ApiTaskNote {
   updated_at: string
 }
 
+export interface ApiTaskNoteListItem {
+  id: string
+  daily_task_id: string
+  task_title: string
+  plan_date: string
+  kind: string
+  title: string
+  body_preview: string
+  file_path: string
+  has_content: boolean
+  created_at: string
+  updated_at: string
+}
+
 export interface ApiTaskMemory {
   id: string
   daily_task_id: string
@@ -71,6 +85,12 @@ export interface ApiDailyTask {
   workflow_plans?: ApiWorkflowPlanGroup[]
   notes: ApiTaskNote[]
   memories: ApiTaskMemory[]
+  continued_from_id?: string | null
+  continued_to_id?: string | null
+  continued_from_plan_date?: string | null
+  continued_from_title?: string | null
+  continued_to_plan_date?: string | null
+  continued_to_title?: string | null
 }
 
 export interface ApiDailyTaskSummary {
@@ -90,6 +110,10 @@ export interface ApiDailyTaskSummary {
   plan_done_count: number
   plan_author: string | null
   plan_updated_at: string | null
+  continued_from_id?: string | null
+  continued_to_id?: string | null
+  continued_from_plan_date?: string | null
+  continued_to_plan_date?: string | null
   created_at: string
 }
 
@@ -176,6 +200,13 @@ export function deleteDailyTask(id: string) {
   return apiFetch<void>(`/schedule/tasks/${id}`, { method: 'DELETE' })
 }
 
+export function continueDailyTask(id: string, targetDate?: string) {
+  return apiFetch<ApiDailyTask>(`/schedule/tasks/${id}/continue`, {
+    method: 'POST',
+    body: JSON.stringify(targetDate ? { target_date: targetDate } : {}),
+  })
+}
+
 export function planToday(
   goal: string,
   workflowDefinitionId?: string | null,
@@ -259,8 +290,52 @@ export function createTaskNote(
   })
 }
 
+export function listScheduleNotes(opts?: { planDate?: string; days?: number }) {
+  const params = new URLSearchParams()
+  if (opts?.planDate) params.set('plan_date', opts.planDate)
+  if (opts?.days != null) params.set('days', String(opts.days))
+  const q = params.toString() ? `?${params}` : ''
+  return apiFetch<ListResponse<ApiTaskNoteListItem>>(`/schedule/notes${q}`)
+}
+
 export function deleteTaskNote(taskId: string, noteId: string) {
   return apiFetch<void>(`/schedule/tasks/${taskId}/notes/${noteId}`, { method: 'DELETE' })
+}
+
+export async function downloadTaskNote(taskId: string, noteId: string) {
+  const res = await fetch(`${API_BASE}/schedule/tasks/${taskId}/notes/${noteId}/download`)
+  if (!res.ok) {
+    let message = res.statusText || `HTTP ${res.status}`
+    try {
+      const body = await res.json()
+      message = body?.error?.message || body?.detail || message
+    } catch {
+      /* ignore */
+    }
+    throw new Error(message)
+  }
+  const blob = await res.blob()
+  let filename = 'note.md'
+  const cd = res.headers.get('Content-Disposition') || ''
+  const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(cd)
+  const plain = /filename="?([^";]+)"?/i.exec(cd)
+  if (utf8?.[1]) {
+    try {
+      filename = decodeURIComponent(utf8[1])
+    } catch {
+      filename = utf8[1]
+    }
+  } else if (plain?.[1]) {
+    filename = plain[1]
+  }
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
 }
 
 export function createTaskMemory(

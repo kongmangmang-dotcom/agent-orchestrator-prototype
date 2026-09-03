@@ -82,3 +82,10 @@ export function terminateWorkflowRun(
     body: JSON.stringify(body ?? {}),
   })
 }
+
+export function continueWorkflowRun(id: string) {
+  return apiFetch<ApiWorkflowRun>(`/workflows/runs/${id}/continue`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  })
+}

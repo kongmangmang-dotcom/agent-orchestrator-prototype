@@ -69,6 +69,7 @@ export interface ApiWorkflowStepDef {
   role: string
   depends_on: string[]
   parallel: boolean
+  on_complete?: 'none' | 'notify' | 'confirm' | string
   sort_order: number
 }
 
@@ -90,6 +91,7 @@ export interface CreateWorkflowStepInput {
   role?: string
   depends_on?: string[]
   parallel?: boolean
+  on_complete?: 'none' | 'notify' | 'confirm' | string
   sort_order?: number
 }
 
@@ -124,12 +126,22 @@ export interface ApiWorkflowStepRun {
   role?: string
   depends_on: string[]
   parallel: boolean
+  on_complete?: string
   status: string
   progress: number
   agent_run_id: string | null
   summary: string
   started_at: string | null
   finished_at: string | null
+}
+
+export interface ApiWorkflowStepNotification {
+  id: string
+  step_key: string
+  label: string
+  kind: string
+  at: string
+  agent_run_id?: string | null
 }
 
 export interface ApiWorkflowRun {
@@ -144,6 +156,8 @@ export interface ApiWorkflowRun {
   error_message: string | null
   daily_task_id?: string | null
   linked_note_count?: number
+  paused_after_steps?: string[]
+  step_notifications?: ApiWorkflowStepNotification[]
   steps: ApiWorkflowStepRun[]
   started_at: string | null
   finished_at: string | null
