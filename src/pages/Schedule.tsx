@@ -17,6 +17,7 @@ import {
   downloadTaskNote,
   getDailyTask,
   getDayOverview,
+  generateDailyReport,
   getLatestTaskAgentChat,
   listDailyTasks,
   regeneratePlan,
@@ -153,6 +154,7 @@ export function SchedulePage() {
   const [showCarryPicker, setShowCarryPicker] = useState(false)
   const [carryPreview, setCarryPreview] = useState<ApiDailyTask | null>(null)
   const [carryPreviewLoading, setCarryPreviewLoading] = useState(false)
+  const [generatingReport, setGeneratingReport] = useState(false)
   const [noteFormKey, setNoteFormKey] = useState(0)
   const [noteError, setNoteError] = useState<string | null>(null)
   const noteFormRef = useRef<HTMLFormElement>(null)
@@ -754,6 +756,27 @@ export function SchedulePage() {
     await handleContinueTask(sourceId, true)
   }
 
+  async function handleGenerateDailyReport() {
+    if (generatingReport) return
+    setGeneratingReport(true)
+    setError(null)
+    try {
+      const res = await generateDailyReport({ planDate, force: true })
+      if (res.skipped) {
+        setError(`日报已存在：${res.document_name || res.plan_date}`)
+      } else {
+        setError(null)
+        window.alert(
+          `已生成工作日报「${res.document_name}」并写入知识库「${res.knowledge_name}」（任务 ${res.task_count} 个）`,
+        )
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '生成工作日报失败')
+    } finally {
+      setGeneratingReport(false)
+    }
+  }
+
   async function handleSaveRequirement() {
     if (!selectedId || savingMeta) return
     const title = editTitle.trim()
@@ -1054,6 +1077,15 @@ export function SchedulePage() {
                 计划步骤 {overview.plan_done_count}/{overview.plan_item_count}
                 {overview.plan_item_count > 0 ? `（${stepRate}%）` : ''}
               </div>
+              <button
+                type="button"
+                disabled={generatingReport}
+                className="mt-1 w-full inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-md text-[11px] border border-dashed border-border-subtle text-text-muted hover:border-accent/50 hover:text-accent disabled:opacity-40"
+                onClick={() => void handleGenerateDailyReport()}
+                title="汇总当日任务写入「工作总结」知识库（每晚 22:00 也会自动生成）"
+              >
+                {generatingReport ? '生成中…' : '生成工作日报'}
+              </button>
             </div>
           )}
           {isToday && carryCandidates.length > 0 && (

@@ -158,6 +158,29 @@ export function getDayOverview(planDate?: string) {
   return apiFetch<ApiDayOverview>(`/schedule/overview${q}`)
 }
 
+export interface ApiDailyReportResult {
+  plan_date: string
+  knowledge_id: string
+  knowledge_name: string
+  document_id: string | null
+  document_name: string | null
+  skipped: boolean
+  reason: string | null
+  task_count: number
+  chat_backend: string
+}
+
+export function generateDailyReport(opts?: { planDate?: string; force?: boolean }) {
+  const params = new URLSearchParams()
+  if (opts?.planDate) params.set('plan_date', opts.planDate)
+  if (opts?.force) params.set('force', 'true')
+  const q = params.toString() ? `?${params}` : ''
+  return apiFetch<ApiDailyReportResult>(`/schedule/daily-report${q}`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  })
+}
+
 export function getDayOverviewRange(opts?: {
   days?: number
   startDate?: string
