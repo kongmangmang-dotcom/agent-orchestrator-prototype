@@ -13,6 +13,7 @@ export const roleLabel: Record<string, string> = {
   tester: 'Tester',
   reviewer: 'Reviewer',
   integrator: 'Integrator',
+  game_designer: 'Game Designer',
 }
 
 export function displayRole(role?: string | null) {

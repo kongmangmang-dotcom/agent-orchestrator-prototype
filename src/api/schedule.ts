@@ -71,6 +71,7 @@ export interface ApiDailyTask {
   priority: string
   summary: string
   requirement: string
+  tags: string[]
   workflow_definition_id: string | null
   bound_workflow_ids: string[]
   workflow_name: string | null
@@ -102,6 +103,7 @@ export interface ApiDailyTaskSummary {
   priority: string
   summary: string
   requirement: string
+  tags?: string[]
   workflow_definition_id: string | null
   bound_workflow_ids?: string[]
   workflow_name: string | null
@@ -143,6 +145,7 @@ export interface CreateDailyTaskInput {
   priority?: string
   summary?: string
   requirement?: string
+  tags?: string[]
   plan_date?: string
   with_plan?: boolean
   workflow_definition_id?: string | null

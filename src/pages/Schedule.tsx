@@ -52,6 +52,95 @@ const statusBadge = {
   todo: { label: '待办', variant: 'default' as const },
 }
 
+const priorityBadge = {
+  high: { label: '紧急', variant: 'danger' as const },
+  medium: { label: '普通', variant: 'warning' as const },
+  low: { label: '低优', variant: 'default' as const },
+}
+
+const TASK_TAG_PRESETS = ['阻塞', '跟进', '评审', '文档'] as const
+
+function TaskTagEditor({
+  tags,
+  onChange,
+  disabled,
+}: {
+  tags: string[]
+  onChange: (next: string[]) => void
+  disabled?: boolean
+}) {
+  const [customTag, setCustomTag] = useState('')
+
+  function toggleTag(tag: string) {
+    if (disabled) return
+    onChange(tags.includes(tag) ? tags.filter(t => t !== tag) : [...tags, tag])
+  }
+
+  function addCustomTag() {
+    const tag = customTag.trim()
+    if (!tag || disabled) return
+    if (!tags.includes(tag)) onChange([...tags, tag])
+    setCustomTag('')
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap gap-2">
+        {TASK_TAG_PRESETS.map(tag => {
+          const active = tags.includes(tag)
+          return (
+            <button
+              key={tag}
+              type="button"
+              disabled={disabled}
+              onClick={() => toggleTag(tag)}
+              className={`px-2.5 py-1 rounded-full text-xs border transition-colors disabled:opacity-40 ${
+                active
+                  ? 'bg-accent/15 border-accent/40 text-accent'
+                  : 'bg-surface-2 border-border-subtle text-text-muted hover:border-accent/30 hover:text-text'
+              }`}
+            >
+              {tag}
+            </button>
+          )
+        })}
+        {tags
+          .filter(t => !(TASK_TAG_PRESETS as readonly string[]).includes(t))
+          .map(tag => (
+            <button
+              key={tag}
+              type="button"
+              disabled={disabled}
+              onClick={() => toggleTag(tag)}
+              className="px-2.5 py-1 rounded-full text-xs border bg-accent/15 border-accent/40 text-accent disabled:opacity-40"
+              title="点击移除"
+            >
+              {tag} ×
+            </button>
+          ))}
+      </div>
+      <div className="flex gap-2 items-center">
+        <input
+          value={customTag}
+          disabled={disabled}
+          onChange={e => setCustomTag(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              addCustomTag()
+            }
+          }}
+          placeholder="自定义标签后回车"
+          className="flex-1 px-3 py-2 rounded-lg border border-border-subtle bg-surface-2 text-sm disabled:opacity-40"
+        />
+        <Btn type="button" variant="secondary" size="sm" onClick={addCustomTag} disabled={disabled || !customTag.trim()}>
+          添加
+        </Btn>
+      </div>
+    </div>
+  )
+}
+
 function localDateStr(d = new Date()) {
   const y = d.getFullYear()
   const m = String(d.getMonth() + 1).padStart(2, '0')
@@ -138,12 +227,16 @@ export function SchedulePage() {
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [createTitle, setCreateTitle] = useState('')
   const [createRequirement, setCreateRequirement] = useState('')
+  const [createPriority, setCreatePriority] = useState<'high' | 'medium' | 'low'>('medium')
+  const [createTags, setCreateTags] = useState<string[]>([])
   const [createWorkflowId, setCreateWorkflowId] = useState('')
   const [createError, setCreateError] = useState<string | null>(null)
   const [planWorkflowId, setPlanWorkflowId] = useState('')
   const [bindWorkflowId, setBindWorkflowId] = useState('')
   const [editTitle, setEditTitle] = useState('')
   const [editRequirement, setEditRequirement] = useState('')
+  const [editPriority, setEditPriority] = useState<'high' | 'medium' | 'low'>('medium')
+  const [editTags, setEditTags] = useState<string[]>([])
   const [savingMeta, setSavingMeta] = useState(false)
   const [adding, setAdding] = useState(false)
   const [startingWf, setStartingWf] = useState(false)
@@ -389,6 +482,10 @@ export function SchedulePage() {
             task.title ||
             '',
         )
+        setEditPriority(
+          task.priority === 'high' || task.priority === 'low' ? task.priority : 'medium',
+        )
+        setEditTags(Array.isArray(task.tags) ? task.tags : [])
       }
     } catch (e) {
       if (!silent) {
@@ -539,6 +636,8 @@ export function SchedulePage() {
   function openCreateModal() {
     setCreateTitle('')
     setCreateRequirement('')
+    setCreatePriority('medium')
+    setCreateTags([])
     setCreateWorkflowId(planWorkflowId || workflows[0]?.id || '')
     setCreateError(null)
     setShowCreateModal(true)
@@ -565,6 +664,8 @@ export function SchedulePage() {
       const created = await createDailyTask({
         title: title.trim() || '未命名任务',
         requirement,
+        priority: createPriority,
+        tags: createTags,
         plan_date: planDate,
         with_plan: false,
         workflow_definition_id: createWorkflowId || null,
@@ -579,6 +680,10 @@ export function SchedulePage() {
           created.title ||
           '',
       )
+      setEditPriority(
+        created.priority === 'high' || created.priority === 'low' ? created.priority : 'medium',
+      )
+      setEditTags(Array.isArray(created.tags) ? created.tags : [])
       await loadTasks(created.id)
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : '创建失败')
@@ -790,10 +895,16 @@ export function SchedulePage() {
       const updated = await updateDailyTask(selectedId, {
         title,
         requirement: editRequirement.trim(),
+        priority: editPriority,
+        tags: editTags,
       })
       setDetail(updated)
       setEditTitle(updated.title)
       setEditRequirement(updated.requirement || '')
+      setEditPriority(
+        updated.priority === 'high' || updated.priority === 'low' ? updated.priority : 'medium',
+      )
+      setEditTags(Array.isArray(updated.tags) ? updated.tags : [])
       await loadTasks(selectedId)
     } catch (e) {
       setError(e instanceof Error ? e.message : '保存任务要求失败')
@@ -1207,6 +1318,12 @@ export function SchedulePage() {
                     <Badge variant={(statusBadge[task.status as keyof typeof statusBadge] ?? statusBadge.todo).variant}>
                       {(statusBadge[task.status as keyof typeof statusBadge] ?? statusBadge.todo).label}
                     </Badge>
+                    <Badge variant={(priorityBadge[task.priority as keyof typeof priorityBadge] ?? priorityBadge.medium).variant}>
+                      {(priorityBadge[task.priority as keyof typeof priorityBadge] ?? priorityBadge.medium).label}
+                    </Badge>
+                    {(task.tags ?? []).map(tag => (
+                      <Badge key={tag} variant="info">{tag}</Badge>
+                    ))}
                     {task.workflow_title && <Badge variant="info">{task.workflow_title}</Badge>}
                     {task.continued_from_id && <Badge variant="default">续作</Badge>}
                     {task.continued_to_id && <Badge variant="default">已续走</Badge>}
@@ -1279,6 +1396,22 @@ export function SchedulePage() {
                     className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-surface-2 text-sm resize-y min-h-[120px]"
                   />
                 </label>
+                <label className="block space-y-1.5">
+                  <span className="text-xs text-text-muted">紧急程度</span>
+                  <select
+                    value={createPriority}
+                    onChange={e => setCreatePriority(e.target.value as 'high' | 'medium' | 'low')}
+                    className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-surface-2 text-sm"
+                  >
+                    <option value="high">紧急</option>
+                    <option value="medium">普通</option>
+                    <option value="low">低优</option>
+                  </select>
+                </label>
+                <div className="space-y-1.5">
+                  <span className="text-xs text-text-muted">任务标签</span>
+                  <TaskTagEditor tags={createTags} onChange={setCreateTags} disabled={adding} />
+                </div>
                 <label className="block space-y-1.5">
                   <span className="text-xs text-text-muted">绑定工作流（可选）</span>
                   <select
@@ -1438,6 +1571,22 @@ export function SchedulePage() {
                   className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-surface-0 text-sm resize-y min-h-[120px]"
                 />
               </label>
+              <label className="block space-y-1.5">
+                <span className="text-xs text-text-muted">紧急程度</span>
+                <select
+                  value={editPriority}
+                  onChange={e => setEditPriority(e.target.value as 'high' | 'medium' | 'low')}
+                  className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-surface-0 text-sm"
+                >
+                  <option value="high">紧急</option>
+                  <option value="medium">普通</option>
+                  <option value="low">低优</option>
+                </select>
+              </label>
+              <div className="space-y-1.5">
+                <span className="text-xs text-text-muted">任务标签</span>
+                <TaskTagEditor tags={editTags} onChange={setEditTags} disabled={savingMeta || detailLoading} />
+              </div>
               <div className="flex justify-end">
                 <Btn variant="primary" size="sm" onClick={handleSaveRequirement} disabled={savingMeta || detailLoading}>
                   {savingMeta ? '保存中…' : '保存要求'}
